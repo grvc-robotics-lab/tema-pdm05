@@ -4,11 +4,11 @@ This repository contains a Flask web application designed for PDM-tech-05 (Infor
 
 ## How to use
 
-### 1. Pull the Docker Image
+### 1. Build docker image
 
 
 ```bash
-docker pull ghcr.io/he-tema/inf_fusion:latest
+docker build -t inf_fusion:latest
 ```
 ### 2. Environment Variables
 
@@ -44,7 +44,7 @@ docker run -it -p 5505:5505 \
   -e OBJECT_NAME="estimated_ogm_ND.tif" \
   -e BUCKET_NAME="naples" \
   -e PROCESSING_UNIT="cpu" \
-  ghcr.io/he-tema/inf_fusion:latest
+  inf_fusion:latest
 
 ```
 
