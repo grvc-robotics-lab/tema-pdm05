@@ -47,25 +47,3 @@ docker run -it -p 5505:5505 \
   inf_fusion:latest
 
 ```
-
-**Explanation of the command:**
-- `-d`: Runs the container in detached mode (in the background).
-- `-p 5505:5505`: Maps port 5505 on your host to port 5505 on the container.
-- `--env-file .env`: Passes the environment variables specified in the `.env` file.
-
-### 3. Access the Application
-
-Once the container is running, you can access the application by navigating to:
-
-```
-http://localhost:5505
-```
-
-### 4. Application Structure
-
-The main components of the application include:
-
-- `app.py`: The main Flask application file.
-- `requirements.txt`: Lists the Python packages required to run the application.
-- `.env`: Contains environment variable configurations for the application.
-
