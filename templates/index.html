@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ server_data.app_name }} Server Info</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        .server-info {
+            background-color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        .server-info ul {
+            list-style: none;
+            padding: 0;
+        }
+        .server-info li {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-bottom: 1px solid #ddd;
+        }
+        .server-info li:last-child {
+            border-bottom: none;
+        }
+        .server-info li strong {
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+    <h1>{{ server_data.app_name }}</h1>
+
+    <div class="server-info">
+        <ul>
+            <li><strong>App Name:</strong> {{ server_data.app_name }}</li>
+            <li><strong>Debug Mode:</strong> {{ 'On' if server_data.debug_mode else 'Off' }}</li>
+            <li><strong>Host:</strong> {{ server_data.HOST }}</li>
+            <li><strong>Port:</strong> {{ server_data.PORT }}</li>
+        </ul>
+    </div>
+</body>
+</html>

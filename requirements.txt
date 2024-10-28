@@ -1,0 +1,9 @@
+python-dotenv~=0.21.1
+Flask==3.0.3
+Flask_SocketIO==5.4.1
+minio==7.2.9
+Pillow~=10.4.0
+pyproj==3.5.0
+PyQt5==5.15.11
+Requests==2.32.3
+
