@@ -22,7 +22,6 @@ COPY environment.yml .
 RUN conda env create -f environment.yml
 
 # Set Conda's default shell for subsequent RUN commands to the new environment
-# Replace 'your_env_name' with the environment name specified in environment.yml
 SHELL ["conda", "run", "-n", "geo_env", "/bin/bash", "-c"]
 
 # Set PROJ_LIB environment variable
@@ -45,6 +44,12 @@ ENV MINIO_SECRET_KEY=rTV2pwa2PMApAzgV3tssGf7NKNVobM3MalAaSXpY
 ENV OBJECT_NAME=estimated_ogm_ND.tif
 ENV BUCKET_NAME=naples
 ENV PROCESSING_UNIT=cpu
+
+# Callback Configuration (New: environment variables without default values)
+ENV PUBLIC_IP_ADDRESS=informationfusion.pagekite.me
+ENV BASE_PATH=/pdm05
+ENV API_ENDPOINT=notify
+
 
 # Expose the necessary port
 EXPOSE 5505

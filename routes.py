@@ -1,4 +1,3 @@
-# routes.py
 import threading
 import requests
 import time
@@ -45,14 +44,15 @@ ND_entity_ID = None
 obj_entity_ID = None
 polygon_coordinates = None
 
-global_cache = {"processing": False, "natural_disaster": "No disaster info", "roi":"No disaster info"}
+global_cache = {"processing": False, "natural_disaster": "No disaster info", "roi": "No disaster info"}
 global_cache_lock = threading.Lock()
 start_event = threading.Event()
 
 
-@app.route('/')
+@app.route(f'{config.BASE_PATH}')
 def index():
     return jsonify({"status": "App is running", "message": "Occupancy Grid Estimation System"})
+
 
 def handle_person_vehicle_detection(notification, parameters):
     auth_filename = notification.get('parameters', {}).get('value', {}).get('FileName', None)
@@ -68,7 +68,7 @@ def handle_person_vehicle_detection(notification, parameters):
 
     json_file_path_metadata = f"downloads/drone_imgs/{global_cache.get('natural_disaster', 'No disaster info')}/{metadata_file}"
     json_file_path_detection = f"downloads/drone_imgs/{global_cache.get('natural_disaster', 'No disaster info')}/{detection_file}"
-    if global_cache.get('natural_disaster', 'No disaster info')!='No disaster info':
+    if global_cache.get('natural_disaster', 'No disaster info') != 'No disaster info':
         try:
             # Write to metadata file
             with open(json_file_path_metadata, 'w') as json_file:
@@ -80,6 +80,7 @@ def handle_person_vehicle_detection(notification, parameters):
 
         except Exception as e:
             logger.error(f"Error writing detection files: {e}")
+
 
 def handle_segmentation(notification):
     bucket = notification.get("bucket", {}).get('value')
@@ -132,6 +133,7 @@ def process_notification(notification):
     else:
         handle_file_download(notification)
 
+
 def process_alert(notification, entity_id):
     area = notification.get("location", {})
     if isinstance(area, dict) and "value" in area:
@@ -182,9 +184,8 @@ def download_file(entity_type, filename_, bucket):
         return None
 
 
-@app.route('/notify', methods=['POST'])
+@app.route(f"{config.BASE_PATH}/{config.API_ENDPOINT}", methods=['POST'])
 def notify():
-
     notification_data = request.get_json()
     logger.info(f"Notification data received: {notification_data}")
 
@@ -211,6 +212,7 @@ def notify():
 
     return jsonify({"status": "Notifications processed successfully"}), 200
 
+
 def initialize_processing():
     while True:
         if start_event.is_set():
@@ -219,13 +221,13 @@ def initialize_processing():
             try:
                 estimate_ND_status()
             except Exception as e:
-                print(f"No OGM for ND due to {e}")                
+                print(f"No OGM for ND due to {e}")
                 logger.info(f"No OGM for ND due to {e}")
             try:
                 estimate_Objects_status()
             except Exception as e:
                 print(f"No OGM for objects due to {e}")
-                logger.info(f"No OGM for objects due to {e}")                
+                logger.info(f"No OGM for objects due to {e}")
 
 
 def subscribe_to_entities():
@@ -261,15 +263,15 @@ def subscribe_to_entities():
         "notification": {
             "attributes":
                 [
-                "minio_url",
-                "filename",
-                "bucket",
-                "parameters",
-                "segmentation",
-                "detection",
-                "location",
-                "event",
-                "effective",
+                    "minio_url",
+                    "filename",
+                    "bucket",
+                    "parameters",
+                    "segmentation",
+                    "detection",
+                    "location",
+                    "event",
+                    "effective",
                 ],
             "endpoint": {
                 "uri": config.CALLBACK_URL,
@@ -803,6 +805,7 @@ def create_entity(entity_ID, entity_type_):
 ########################################################################################################################
 # Update Entity
 ########################################################################################################################
+@app.route(f'{config.BASE_PATH}/update_entity', methods=['POST'])
 def update_entity(entity_id_, payload):
     response = None
     url_ = f'{config.BROKER_URL}/ngsi-ld/v1/entities/{entity_id_}/attrs'
@@ -961,7 +964,7 @@ def get_sate_roi(PolygonCoords):
             for sat_folders in sorted(os.listdir("Satellite_DLR"), reverse=False):
                 sat_title_splits = sat_folders.split('_')
                 geo_tiff = os.path.join("Satellite_DLR", sat_folders, f"{'_'.join(sat_title_splits)}_WATER.tif")
-                
+
                 #########################################################################
                 # Rasterio
                 #########################################################################
@@ -1309,7 +1312,6 @@ def geojson_to_multi_band_geotiff(geojson_file, geotiff_file, pixel_size_lat, pi
     # Rasterize the 'score' attribute into Band 2
     gdal.RasterizeLayer(target_ds, [2], source_layer, options=["ATTRIBUTE=score"])
 
-
     print(f"Rasterization complete. Output saved as: {geotiff_file}")
 
 
@@ -1582,7 +1584,6 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
     logger.info(f"inside process_and_upload_ogm entity_id ---> {entity_id}")
     print(f"inside process_and_upload_ogm entity_id ---> {entity_id}")
 
-
     object_name = file_path_.split("/")[-1]
     print(f"file path {file_path_}")
     try:
@@ -1610,4 +1611,3 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
             logger.error(f"Failed to publish payload for entity: {entity_id}")
     except Exception as e:
         logger.error(f"Error updating NGSI-LD entity: {e}")
-
