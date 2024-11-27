@@ -1,3 +1,10 @@
 
 *.pyc
 /__pycache__
+__pycache__/config.cpython-39.pyc
+__pycache__/Kalman_filter_estimating_Objects.cpython-39.pyc
+__pycache__/logging_config.cpython-39.pyc
+__pycache__/minio_client.cpython-39.pyc
+__pycache__/routes.cpython-39.pyc
+app_routes.log
+estimated_OGM/occupancy_grid_map_Fire.tif
