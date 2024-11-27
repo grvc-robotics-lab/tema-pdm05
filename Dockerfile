@@ -45,11 +45,10 @@ ENV OBJECT_NAME=estimated_ogm_ND.tif
 ENV BUCKET_NAME=naples
 ENV PROCESSING_UNIT=cpu
 
-# Callback Configuration (New: environment variables without default values)
+# Callback Configuration 
 ENV PUBLIC_IP_ADDRESS=informationfusion.pagekite.me
 ENV BASE_PATH=/pdm05
 ENV API_ENDPOINT=notify
-
 
 # Expose the necessary port
 EXPOSE 5505

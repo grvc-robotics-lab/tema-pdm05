@@ -183,4 +183,5 @@ dependencies:
       - urllib3==2.2.3
       - werkzeug==3.0.4
       - wsproto==1.2.0
+      - olefile==0.47
 prefix: /home/grvc/anaconda3/envs/geo_env

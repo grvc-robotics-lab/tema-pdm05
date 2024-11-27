@@ -20,6 +20,13 @@ HOST = os.getenv('HOST')
 DEBUG = os.getenv('DEBUG')
 PORT = os.getenv('PORT')
 
+# TEMP_CALLBACK = os.getenv("CALLBACK_NGROK")
+#
+# if TEMP_CALLBACK is not None:
+#     CALLBACK_URL = TEMP_CALLBACK
+# else:
+#     CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
+
 # Dynamically construct CALLBACK_URL
 CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
 
