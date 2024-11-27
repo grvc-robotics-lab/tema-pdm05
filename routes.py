@@ -130,7 +130,7 @@ def process_notification(notification):
     elif entity_type == "PersonVehicleDetection":
         parameters = notification.get("parameters", {}).get('value', {})
         handle_person_vehicle_detection(notification, parameters)
-    elif entity_type in ["BurntSegmentation", "FloodSegmentation"]:
+    elif entity_type in ["FireSegmentation", "BurntSegmentation", "FloodSegmentation"]:
         handle_segmentation(notification)
     else:
         handle_file_download(notification)
@@ -246,6 +246,7 @@ def subscribe_to_entities():
             {"type": "Alert"},  # Alert entity by END USER
             {"type": "FloodCalculationResults"},  # NS PDM-tech-02 for Flood prediction ---> GeoTIFF
             {"type": "StandardArrivalTime"},
+            {"type": "FireSegmentation"},
             {"type": "BurntSegmentation"},
             {"type": "FloodSegmentation"},  # AUTH TFA-tech-06 ---> image
             {"type": "PersonVehicleDetection"},  # AUTH TFA-tech-05 ---> JSON
