@@ -14,6 +14,7 @@ from logging_config import logger
 
 path = None
 
+
 def main(natural_disaster):
     global path
     disaster = natural_disaster
@@ -537,4 +538,3 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
     dataset.SetGeoTransform(geotransform)
 
     return image, geotransform, srs.ExportToWkt()
-

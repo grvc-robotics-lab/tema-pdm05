@@ -8,6 +8,7 @@ import rasterio
 import logging
 import config
 import geopandas as gpd
+import queue
 
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO
@@ -47,11 +48,15 @@ polygon_coordinates = None
 
 global_cache = {"processing": False, "natural_disaster": "No disaster info", "roi": "No disaster info"}
 global_cache_lock = threading.Lock()
-start_event = threading.Event()
+
+alert_event = threading.Event()  # Event triggered by Alert notifications
+other_entity_event = threading.Event()  # Event triggered by other notifications
+notification_queue = queue.Queue()  # Thread-safe queue for non-Alert notifications
+entities_initialized = False  # Tracks whether initialize_entities has run
 
 
-@app.route(f'{config.BASE_PATH}')
-# @app.route('/')
+# @app.route(f'{config.BASE_PATH}')
+@app.route('/')
 def index():
     return jsonify({"status": "App is running", "message": "Occupancy Grid Estimation System"})
 
@@ -118,24 +123,6 @@ def handle_segmentation(notification):
         logger.error(f"Error writing segmentation metadata: {e}")
 
 
-def process_notification(notification):
-    entity_id = notification.get("id")
-    entity_type = notification.get("type")
-    logger.info(f"Processing notification for entity ID: {entity_id}, Entity type: {entity_type}")
-
-    # Process different entity types accordingly
-    if entity_type == "Alert":
-        process_alert(notification, entity_id)
-        start_event.set()
-    elif entity_type == "PersonVehicleDetection":
-        parameters = notification.get("parameters", {}).get('value', {})
-        handle_person_vehicle_detection(notification, parameters)
-    elif entity_type in ["FireSegmentation", "BurntSegmentation", "FloodSegmentation"]:
-        handle_segmentation(notification)
-    else:
-        handle_file_download(notification)
-
-
 def process_alert(notification, entity_id):
     area = notification.get("location", {})
     if isinstance(area, dict) and "value" in area:
@@ -186,8 +173,8 @@ def download_file(entity_type, filename_, bucket):
         return None
 
 
-@app.route(f"{config.BASE_PATH}/{config.API_ENDPOINT}", methods=['POST'])
-# @app.route('/notify', methods=['POST'])
+# @app.route(f"{config.BASE_PATH}/{config.API_ENDPOINT}", methods=['POST'])
+@app.route('/notify', methods=['POST'])
 def notify():
     notification_data = request.get_json()
     logger.info(f"Notification data received: {notification_data}")
@@ -216,21 +203,69 @@ def notify():
     return jsonify({"status": "Notifications processed successfully"}), 200
 
 
+def process_notification(notification):
+    entity_id = notification.get("id")
+    entity_type = notification.get("type")
+
+    if not entity_id or not entity_type:
+        logger.error(f"Invalid notification received: {notification}")
+        return
+
+    logger.info(f"Processing notification for entity ID: {entity_id}, Entity type: {entity_type}")
+
+    try:
+        # Process different entity types accordingly
+        if entity_type == "Alert":
+            process_alert(notification, entity_id)
+            logger.info("Triggering Alert entity processing")
+            alert_event.set()
+        elif entity_type == "PersonVehicleDetection":
+            parameters = notification.get("parameters", {}).get('value', {})
+            handle_person_vehicle_detection(notification, parameters)
+        elif entity_type in ["FireSegmentation", "BurntSegmentation", "FloodSegmentation"]:
+            handle_segmentation(notification)
+        else:
+            handle_file_download(notification)
+
+        # Notify initialize_processing for non-Alert entities
+        if entity_type != "Alert":
+            other_entity_event.set()
+
+    except Exception as e:
+        logger.error(f"Error processing notification {entity_id} of type {entity_type}: {e}")
+
+
 def initialize_processing():
+    global entities_initialized
     while True:
-        if start_event.is_set():
-            global polygon_coordinates
-            initialize_entities()
-            try:
-                estimate_ND_status()
-            except Exception as e:
-                print(f"No OGM for ND due to {e}")
-                logger.info(f"No OGM for ND due to {e}")
-            try:
-                estimate_Objects_status()
-            except Exception as e:
-                print(f"No OGM for objects due to {e}")
-                logger.info(f"No OGM for objects due to {e}")
+
+        # Wait for alert_event or other_entity_event to be set
+        if not (alert_event.is_set() or other_entity_event.is_set()):
+            time.sleep(0.1)
+            continue
+
+        try:
+            # Handle Alert-specific instantiation
+            if alert_event.is_set():
+                global polygon_coordinates
+                initialize_entities()
+                entities_initialized = True
+                alert_event.clear()  # Reset Alert event for future triggers
+
+            if other_entity_event.is_set() and entities_initialized:
+                try:
+                    estimate_ND_status()
+                except Exception as e:
+                    print(f"No OGM for ND due to {e}")
+                    logger.info(f"No OGM for ND due to {e}")
+                try:
+                    estimate_Objects_status()
+                except Exception as e:
+                    print(f"No OGM for objects due to {e}")
+                    logger.info(f"No OGM for objects due to {e}")
+                other_entity_event.clear()  # Reset other_entity_event for future triggers
+        except Exception as e:
+            logger.error(f"Error during initialize_processing: {e}")
 
 
 def subscribe_to_entities():
@@ -406,51 +441,89 @@ def fuse_fire_probability(existing_prob, hotspot_value, weight=0.5):
 
 
 def estimate_Objects_status():
-    """Estimate objects status and process the occupancy grid map."""
+    """
+    Estimate objects' status and process the occupancy grid map using data
+    from drones and social media posts.
+    """
     global polygon_coordinates
 
     polygon_coordinates = convert_to_polygon()
     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
     ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
-    # Load or generate the ROI
-    get_roi(polygon_coordinates, ogm_path)
-    try:
-        get_geo_dict(
-            f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects")
-    except Exception as e:
-        logger.info(f"Dict was not created due to {e}")
+
+    # try:
+    #     get_geo_dict(
+    #         f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects")
+    # except Exception as e:
+    #     logger.info(f"Geo dictionary creation failed: {e}")
 
     if disaster_type != 'No disaster info':
-        ogm_metadata = load_existing_geo_dict(
-            f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects")
+        ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects")
+        if not ogm_metadata:
+            logger.error("Failed to load or generate OGM metadata. Aborting process.")
+            return
+
         #######################################################################################
         # Integrate Drone data
         #######################################################################################
         try:
+            # Load or generate the ROI
+            get_roi(polygon_coordinates, ogm_path)
+
             observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images")
             if not observ_metadata:
                 logger.info("Drone metadata is empty or not available.")
-            ogm_metadata = get_observations_in_FOV(ogm_metadata, observ_metadata)
+            else:
+                ogm_metadata = get_observations_in_FOV(ogm_metadata, observ_metadata)
 
-            # Initialize the Kalman filter
-            state_dim = 3  # For position (x, y, z)
-            measurement_dim = 3  # For measurements (x, y, z)
-            kf = KalmanFilter(state_dim, measurement_dim)
-            # Loop through each observation
-            for entry in ogm_metadata:
-                # Check if the label is not zero
-                label = entry.get("label", 0)
-                if label != 0:
-                    # Extract the position (observation)
-                    position = list(entry.values())[0]  # Get the position data from the first (and only) key
-                    z = np.array(position).reshape((measurement_dim, 1))  # Reshape for the update step
-                    # Kalman filter prediction
-                    kf.predict()
-                    # Kalman filter update with the observation
-                    kf.update(z)
-                    # Update the entry with the new state (updated position)
-                    updated_position = kf.x.flatten().tolist()  # Get the updated position
-                    entry[list(entry.keys())[0]] = updated_position  # Update the position in the entry
+                # Initialize the Kalman filter
+                state_dim = 3  # For position (x, y, z)
+                measurement_dim = 3  # For measurements (x, y, z)
+                kf = KalmanFilter(state_dim, measurement_dim)
+
+                # Loop through each observation
+                # for entry in ogm_metadata:
+                #     # Check if the label is not -1
+                #     label = entry.get("label", -1)
+                #     if label != -1:
+                #         # Extract the position (observation)
+                #         position = list(entry.values())[0]  # Get the position data from the first (and only) key
+                #         z = np.array(position).reshape((measurement_dim, 1))  # Reshape for the update step
+                #         # Kalman filter prediction
+                #         kf.predict()
+                #         # Kalman filter update with the observation
+                #         kf.update(z)
+                #         # Update the entry with the new state (updated position)
+                #         updated_position = kf.x.flatten().tolist()  # Get the updated position
+                #         entry[list(entry.keys())[0]] = updated_position  # Update the position in the entry
+                for entry in ogm_metadata:
+                    # Ensure the entry has a valid label
+                    label = entry.get("label", -1)
+                    if label != -1:  # Process entries with valid labels
+                        try:
+                            # Extract the position data
+                            key = next((k for k in entry if isinstance(entry[k], list)), None)
+                            if key:
+                                position = entry[key]  # Position is [lon, lat, elev]
+
+                                # Validate and prepare the position
+                                if len(position) == 3:  # Ensure it has an [x, y, z] format
+                                    z = np.array(position).reshape(
+                                        (measurement_dim, 1))  # Reshape for the Kalman filter
+
+                                    # Kalman filter prediction and update
+                                    kf.predict()
+                                    kf.update(z)
+
+                                    # Update the entry with the new state (updated position)
+                                    updated_position = kf.x.flatten().tolist()  # Convert updated state to list
+                                    entry[key] = updated_position  # Update position in the entry
+                                else:
+                                    logger.warning(f"Invalid position format in entry: {position}")
+                            else:
+                                logger.warning(f"No valid position key found in entry: {entry}")
+                        except Exception as e:
+                            logger.error(f"Error updating Kalman filter for entry {entry}: {e}")
         except Exception as e:
             logger.info(f"Object measurements are not available {e}")
         #######################################################################################
@@ -463,70 +536,127 @@ def estimate_Objects_status():
             logger.info(f"OGM metadata saved to {metadata_path}")
         except Exception as e:
             logger.error(f"Failed to save OGM metadata: {e}")
-        geojson = {"type": "FeatureCollection", "features": []}
-
-        # Iterate over the custom data and convert to GeoJSON features, skipping zero score/label
-        for entry in ogm_metadata:
-            for key, coordinates in entry.items():
-                if isinstance(coordinates, list):  # Coordinates are a list of [lon, lat, alt]
-                    score = entry.get("score", 0.0)
-                    label = entry.get("label", 0)
-                    # Only include features with non-zero score OR label
-                    if score != 0.0 or label != 0:
-                        feature = {
-                            "type": "Feature",
-                            "geometry": {
-                                "type": "Point",
-                                "coordinates": [coordinates[0], coordinates[1], coordinates[2]]  # Use only lon, lat
-                            },
-                            "properties": {
-                                "score": score,
-                                "label": label
-                            }
-                        }
-                        geojson["features"].append(feature)
 
         geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
-        # Write the result to a GeoJSON file
-        try:
-            with open(geojson_path, "w") as f:
-                json.dump(geojson, f, indent=4)
-            logger.info(f"GeoJSON saved to {geojson_path}")
-        except Exception as e:
-            logger.error(f"Failed to save GeoJSON: {e}")
 
         try:
+            geojson = {"type": "FeatureCollection", "features": []}
+            # Iterate over the custom data and convert to GeoJSON features, skipping zero score/label
+            for entry in ogm_metadata:
+                for key, coordinates in entry.items():
+                    if isinstance(coordinates, list) and len(
+                            coordinates) == 3:  # Coordinates are a list of [lon, lat, alt]
+                        score = entry.get("score", 0.0)
+                        label = entry.get("label", -1)
+
+                        if label != -1:
+                            feature = {
+                                "type": "Feature",
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [coordinates[0], coordinates[1], coordinates[2]]  # Use only lon, lat
+                                },
+                                "properties": {
+                                    "score": score,
+                                    "label": label
+                                }
+                            }
+                            geojson["features"].append(feature)
+
+            # Write the result to a GeoJSON file
+            with open(geojson_path, 'w') as f:
+                json.dump(geojson, f, indent=4)  # Save with indentation for readability
+            logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
+
+        except PermissionError as e:
+            logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
+        except FileNotFoundError as e:
+            logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
+        except IOError as e:
+            logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
+
+        #######################################################################################
+        # Convert Geo Json to Geo Tiff
+        #######################################################################################
+        try:
             geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+
+            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
+
+            # Validate the GeoJSON file
+            with open(geojson_path, 'r') as f:
+                geojson_data = json.load(f)
+            if not geojson_data.get("features", []):
+                raise ValueError("GeoJSON file contains no features. Cannot generate raster.")
+
+            # Calculate raster size and validate pixel sizes
+            bbox = get_geojson_bbox(geojson_path)  # Function to compute bounding box
+            logger.info(f"GeoJSON bounding box: {bbox}")
+
+            # Adjust pixel size based on bounding box
+            pixel_size_lat = 0.0001  # Example default pixel size
+            pixel_size_lon = 0.0001
+            raster_width = (bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon
+            raster_height = (bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat
+
+            logger.info(f"Calculated raster size: {raster_width}x{raster_height}")
+            if raster_width <= 0 or raster_height <= 0:
+                raise ValueError("Raster size (x_res, y_res) must be greater than 0. Check pixel sizes.")
+
+            # Convert GeoJSON to GeoTIFF
+            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
             geojson_to_multi_band_geotiff(
                 geojson_path,
                 geotiff_path,
-                pixel_size_lat=0.000008983,
-                pixel_size_lon=0.00001405
+                pixel_size_lat=pixel_size_lat,
+                pixel_size_lon=pixel_size_lon
             )
 
-            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+            logger.info(f"Loading GeoTIFF data from {geotiff_path}")
             ogm_data, ogm_gt_, ogm_proj = load_image(geotiff_path, 0)
+
+            logger.info(f"Saving GeoTIFF to {output_tiff_path}")
             metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
+
+            logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
             process_and_upload_ogm(obj_entity_ID, output_tiff_path, config.BUCKET_NAME, metadata)
+
             logger.info(f"OGM successfully processed and uploaded: {geotiff_path}")
-            ########################################################################################
+
+        except FileNotFoundError as e:
+            logger.error(f"File not found during GeoTIFF conversion: {e}")
+        except PermissionError as e:
+            logger.error(f"Permission error during GeoTIFF conversion: {e}")
+        except ValueError as e:
+            logger.error(f"Value error during GeoTIFF conversion: {e}")
         except Exception as e:
-            logger.info(f"Failed to process AOI GeoTIFF: {e}")
+            logger.error(f"Unexpected error during GeoTIFF conversion: {e}")
 
         #######################################################################################
         # Integrate SinglePostResult data with Kalman filter
         #######################################################################################
         try:
+            # Load OGM data
             ogm_data, ogm_gt_, ogm_proj = load_image(ogm_path, 0)
             social_media_dir = "downloads/SocialMedia"  # Directory containing SinglePostResult files
+
+            # Gather SinglePostResult files
             single_post_files = [os.path.join(social_media_dir, f) for f in os.listdir(social_media_dir)
                                  if f.startswith("single_posts_results") and f.endswith(".geojson")]
+
+            # Process files in chronological order
             single_post_files.sort()  # Process files in chronological order
             logger.info(f"Found {len(single_post_files)} SinglePostResult files.")
+
             # Initialize the Kalman filter
             state_dim = 3  # For position (x, y, z)
             measurement_dim = 3  # For measurements (x, y, z)
             kf = KalmanFilter(state_dim, measurement_dim)
+
+            # Process each SinglePostResult file
             for single_post_file in single_post_files:
                 try:
                     with open(single_post_file, 'r') as f:
@@ -560,17 +690,8 @@ def estimate_Objects_status():
                                                                     refined_position[1])
                                         if 0 <= x < ogm_data.shape[1] and 0 <= y < ogm_data.shape[0]:
                                             # Update OGM metadata for the corresponding grid cell
-                                            emotion_prob = properties.get("emotion_label_probability", 0.0)
-                                            logger.debug(f"Emotion probability: {emotion_prob}")
-                                            emotion_label = properties.get("emotion_label", "person")
-                                            existing_score = ogm_metadata[y][x].get("score", 0.0)
+                                            ogm_metadata[y][x]["coordinates"] = refined_position
 
-                                            # Fuse data into the grid cell
-                                            ogm_metadata[y][x] = {
-                                                "score": max(existing_score, emotion_prob),  # Combine probabilities
-                                                "label": emotion_label,
-                                                "coordinates": refined_position  # Update with refined position
-                                            }
                                     except Exception as e:
                                         logger.warning(
                                             f"Error mapping refined coordinates ({refined_position}) to pixel: {e}")
@@ -598,54 +719,130 @@ def estimate_Objects_status():
             logger.info(f"OGM metadata saved to {metadata_path}")
         except Exception as e:
             logger.error(f"Failed to save OGM metadata: {e}")
-        geojson = {"type": "FeatureCollection", "features": []}
-        # Iterate over the custom data and convert to GeoJSON features, skipping zero score/label
-        for entry in ogm_metadata:
-            for key, coordinates in entry.items():
-                if isinstance(coordinates, list):  # Coordinates are a list of [lon, lat, alt]
-                    score = entry.get("score", 0.0)
-                    label = entry.get("label", 0)
-                    # Only include features with non-zero score OR label
-                    if score != 0.0 or label != 0:
-                        feature = {
-                            "type": "Feature",
-                            "geometry": {
-                                "type": "Point",
-                                "coordinates": [coordinates[0], coordinates[1], coordinates[2]]  # Use only lon, lat
-                            },
-                            "properties": {
-                                "score": score,
-                                "label": label
-                            }
-                        }
-                        geojson["features"].append(feature)
 
         geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
-        # Write the result to a GeoJSON file
-        try:
-            with open(geojson_path, "w") as f:
-                json.dump(geojson, f, indent=4)
-            logger.info(f"GeoJSON saved to {geojson_path}")
-        except Exception as e:
-            logger.error(f"Failed to save GeoJSON: {e}")
 
         try:
+            geojson = {"type": "FeatureCollection", "features": []}
+            # Iterate over the custom data and convert to GeoJSON features, skipping zero score/label
+            for entry in ogm_metadata:
+                for key, coordinates in entry.items():
+                    if isinstance(coordinates, list) and len(coordinates) == 3:
+                        score = entry.get("score", 0.0)
+                        label = entry.get("label", -1)
+
+                        if label != -1:
+                            feature = {
+                                "type": "Feature",
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [coordinates[0], coordinates[1], coordinates[2]]  # Use only lon, lat
+                                },
+                                "properties": {
+                                    "score": score,
+                                    "label": label
+                                }
+                            }
+                            geojson["features"].append(feature)
+
+            # Write the result to a GeoJSON file
+            with open(geojson_path, 'w') as f:
+                json.dump(geojson, f, indent=4)  # Save with indentation for readability
+            logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
+
+        except PermissionError as e:
+            logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
+        except FileNotFoundError as e:
+            logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
+        except IOError as e:
+            logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
+
+        #######################################################################################
+        # Convert Geo Json to Geo Tiff
+        #######################################################################################
+        try:
             geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+
+            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
+
+            # Validate the GeoJSON file
+            with open(geojson_path, 'r') as f:
+                geojson_data = json.load(f)
+            if not geojson_data.get("features", []):
+                raise ValueError("GeoJSON file contains no features. Cannot generate raster.")
+
+            # Calculate raster size and validate pixel sizes
+            bbox = get_geojson_bbox(geojson_path)  # Function to compute bounding box
+            logger.info(f"GeoJSON bounding box: {bbox}")
+
+            # Adjust pixel size based on bounding box
+            pixel_size_lat = 0.0001  # Example default pixel size
+            pixel_size_lon = 0.0001
+            raster_width = (bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon
+            raster_height = (bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat
+
+            logger.info(f"Calculated raster size: {raster_width}x{raster_height}")
+            if raster_width <= 0 or raster_height <= 0:
+                raise ValueError("Raster size (x_res, y_res) must be greater than 0. Check pixel sizes.")
+
+            # Convert GeoJSON to GeoTIFF
+            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
             geojson_to_multi_band_geotiff(
                 geojson_path,
                 geotiff_path,
-                pixel_size_lat=0.000008983,
-                pixel_size_lon=0.00001405
+                pixel_size_lat=pixel_size_lat,
+                pixel_size_lon=pixel_size_lon
             )
 
-            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+            logger.info(f"Loading GeoTIFF data from {geotiff_path}")
             ogm_data, ogm_gt_, ogm_proj = load_image(geotiff_path, 0)
+
+            logger.info(f"Saving GeoTIFF to {output_tiff_path}")
             metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
+
+            logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
             process_and_upload_ogm(obj_entity_ID, output_tiff_path, config.BUCKET_NAME, metadata)
+
             logger.info(f"OGM successfully processed and uploaded: {geotiff_path}")
-            ########################################################################################
+
+        except FileNotFoundError as e:
+            logger.error(f"File not found during GeoTIFF conversion: {e}")
+        except PermissionError as e:
+            logger.error(f"Permission error during GeoTIFF conversion: {e}")
+        except ValueError as e:
+            logger.error(f"Value error during GeoTIFF conversion: {e}")
         except Exception as e:
-            logger.info(f"Failed to process AOI GeoTIFF: {e}")
+            logger.error(f"Unexpected error during GeoTIFF conversion: {e}")
+
+
+def get_geojson_bbox(geojson_path):
+    """Calculate the bounding box of a GeoJSON file."""
+    with open(geojson_path, 'r') as f:
+        geojson_data = json.load(f)
+
+    coordinates = []
+    for feature in geojson_data.get("features", []):
+        geometry = feature.get("geometry", {})
+        if geometry.get("type") == "Point":
+            coordinates.append(geometry["coordinates"])
+        elif geometry.get("type") in ["Polygon", "MultiPolygon"]:
+            # Flatten nested coordinates for polygons
+            coords = geometry["coordinates"]
+            coordinates.extend([coord for polygon in coords for coord in polygon])
+
+    if not coordinates:
+        raise ValueError("No valid coordinates found in GeoJSON.")
+
+    lons, lats = zip(*coordinates)
+    return {
+        "min_lon": min(lons),
+        "max_lon": max(lons),
+        "min_lat": min(lats),
+        "max_lat": max(lats)
+    }
 
 
 def load_raster(filename):
@@ -1379,27 +1576,60 @@ def save_cropped_as_geotiff(cropped_gdf, output_path):
 ########################################################################################################################
 ########################################################################################################################
 def load_existing_geo_dict(tiff_path):
+    """
+    Loads an existing geo dictionary from a JSON file.
+
+    Parameters:
+        tiff_path (str): Path to the GeoTIFF file (without `.json` extension).
+
+    Returns:
+        dict: The loaded geo dictionary if successful.
+        None: If the file does not exist, is empty, or cannot be decoded.
+    """
     geo_dict_path = f"{tiff_path}.json"  # Using the same base name with .json extension
-    if os.path.exists(geo_dict_path):
+
+    if not os.path.exists(geo_dict_path):
+        print(f"Geo dictionary file not found: {geo_dict_path}")
+        return None
+
+    try:
         with open(geo_dict_path, 'r') as f:
             content = f.read().strip()  # Read and strip whitespace
+
             if not content:  # Check if the file is empty
                 print("The JSON file is empty.")
                 return None
+
             try:
                 return json.loads(content)  # Parse JSON content
             except json.JSONDecodeError as e:
                 print(f"Error decoding JSON: {e}")
                 return None
-    return None
+    except IOError as e:
+        print(f"Error reading the file {geo_dict_path}: {e}")
+        return None
 
 
 # Function to generate a new geo dict from a GeoTIFF file
 def generate_geo_dict_from_tiff(tiff_path):
+    """
+    Generates a geographic dictionary from a GeoTIFF file.
+
+    Parameters:
+        tiff_path (str): Path to the GeoTIFF file.
+
+    Returns:
+        list: A list of dictionaries with pixel coordinates, geographic coordinates, and elevation.
+        None: If an error occurs.
+    """
     geo_dict_list = []
     try:
         # Open the GeoTIFF file
         with rasterio.open(tiff_path) as dataset:
+            # Ensure the dataset has at least one band
+            if dataset.count < 1:
+                raise ValueError(f"GeoTIFF file {tiff_path} contains no bands.")
+
             # Read the elevation data from the first band (assuming its elevation)
             elevation_data = dataset.read(1)
 
@@ -1419,34 +1649,62 @@ def generate_geo_dict_from_tiff(tiff_path):
                     geo_dict = {
                         pixel_coords: [float(lon), float(lat), elevation],  # Ensure lon, lat are also native floats
                         "score": 0.0,  # Placeholder for score
-                        "label": 0  # Placeholder for label
+                        "label": -1  # Placeholder for label
                     }
 
                     # Add the entry to the list of dictionaries
                     geo_dict_list.append(geo_dict)
 
         return geo_dict_list
+
+    except rasterio.errors.RasterioIOError as e:
+        logger.error(f"Rasterio I/O error while reading {tiff_path}: {e}")
+    except ValueError as e:
+        logger.error(f"Value error in {tiff_path}: {e}")
     except Exception as e:
-        logger.info(f"Unable to generate Dict due to {e}")
+        logger.error(f"Unexpected error in {tiff_path}: {e}")
+
+    return None
 
 
-# Main function to either load or generate the geo dict
+# To either load or generate the geo dict
 def get_geo_dict(tiff_path):
+    """
+    Retrieves or generates a geo dictionary from a GeoTIFF file.
+
+    Parameters:
+        tiff_path (str): Path to the GeoTIFF file (without `.tif` extension).
+
+    Returns:
+        dict: The geo dictionary, either loaded from an existing file or generated anew.
+    """
     # Check if the geo dict already exists
-    existing_geo_dict = load_existing_geo_dict(tiff_path)
-    if existing_geo_dict:
-        print("Using existing geo dict.")
-        return existing_geo_dict
-    else:
-        try:
-            print("Generating new geo dict from the GeoTIFF.")
-            new_geo_dict = generate_geo_dict_from_tiff(f"{tiff_path}.tif")
-            tiff_path = tiff_path.split('.')[0]
-            # Save the newly created geo dict for future use
-            with open(f"{tiff_path}.json", 'w') as f:
-                json.dump(new_geo_dict, f, indent=4)  # Save with indentation for readability
-        except Exception as e:
-            logger.info(f"could not generate new dict due to {e}")
+    try:
+        existing_geo_dict = load_existing_geo_dict(tiff_path)
+        if existing_geo_dict:
+            print("Using existing geo dict.")
+            return existing_geo_dict
+
+        print("Generating new geo dict from the GeoTIFF.")
+        new_geo_dict = generate_geo_dict_from_tiff(f"{tiff_path}.tif")
+
+        if new_geo_dict is None:
+            logger.error(f"Failed to generate geo dict for {tiff_path}.")
+            return None
+
+        tiff_path = tiff_path.split('.')[0]
+        # Save the newly created geo dict for future use
+        with open(f"{tiff_path}.json", 'w') as f:
+            json.dump(new_geo_dict, f, indent=4)  # Save with indentation for readability
+            print(f"Geo dict saved to {tiff_path}")
+        return new_geo_dict
+
+    except IOError as e:
+        logger.error(f"I/O error while accessing files for {tiff_path}: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error in get_geo_dict for {tiff_path}: {e}")
+
+    return None
 
 
 ########################################################################################################################
@@ -1531,19 +1789,23 @@ def geojson_to_multi_band_geotiff(geojson_file, geotiff_file, pixel_size_lat, pi
 
     # Get the spatial reference and extent (bounding box) of the layer
     spatial_ref = source_layer.GetSpatialRef()
+
     x_min, x_max, y_min, y_max = source_layer.GetExtent()
     print(f"x_min, x_max, y_min, y_max {x_min, x_max, y_min, y_max}")
+
     # Calculate raster size in pixels (resolution) for latitude and longitude
     x_res = int((x_max - x_min) / pixel_size_lon)
     y_res = int((y_max - y_min) / pixel_size_lat)
     # Ensure valid raster size
     if x_res <= 0 or y_res <= 0:
         raise ValueError("Raster size (x_res, y_res) must be greater than 0. Please check pixel sizes.")
-
     print(f"x_res: {x_res}, y_res: {y_res}")
+    
     print(f"GeoTIFF file path: {geotiff_file}")
     # Create the target raster dataset (GeoTIFF) with two bands
     target_ds = gdal.GetDriverByName('GTiff').Create(geotiff_file, x_res, y_res, 2, gdal.GDT_Float32)
+    if target_ds is None:
+        raise RuntimeError(f"Failed to create GeoTIFF file: {geotiff_file}")
 
     # Define the geotransform: [top-left x, pixel width (lon), 0, top-left y, 0, -pixel height (lat)]
     geotransform = (x_min, pixel_size_lon, 0, y_max, 0, -pixel_size_lat)
@@ -1552,49 +1814,82 @@ def geojson_to_multi_band_geotiff(geojson_file, geotiff_file, pixel_size_lat, pi
     # Set the projection (spatial reference) of the raster to match the source layer
     target_ds.SetProjection(spatial_ref.ExportToWkt())
 
+    # Validate attributes in the GeoJSON file
+    layer_defn = source_layer.GetLayerDefn()
+    attribute_names = [layer_defn.GetFieldDefn(i).GetName() for i in range(layer_defn.GetFieldCount())]
+    if "label" not in attribute_names or "score" not in attribute_names:
+        raise ValueError("GeoJSON file must contain 'label' and 'score' attributes.")
+
     # Rasterize the 'label' attribute into Band 1
+    print(f"Rasterizing 'label' attribute to Band 1")
     gdal.RasterizeLayer(target_ds, [1], source_layer, options=["ATTRIBUTE=label"])
 
     # Rasterize the 'score' attribute into Band 2
+    print(f"Rasterizing 'score' attribute to Band 2")
     gdal.RasterizeLayer(target_ds, [2], source_layer, options=["ATTRIBUTE=score"])
 
     print(f"Rasterization complete. Output saved as: {geotiff_file}")
+    target_ds.FlushCache()  # Ensure all changes are written to the file
+    target_ds = None  # Close the dataset to free resources
 
 
 def get_geotiff_metadata_rasterio(geotiff_path):
-    for file_path in sorted(os.listdir(geotiff_path)):
-        if file_path.endswith("_Objects.tif"):
-            dataset = gdal.Open(os.path.join(geotiff_path, file_path))
-            if dataset is None:
-                print(f"Unable to open {geotiff_path}")
-                return None
+    """
+    Extract and transform metadata from GeoTIFF files with GDAL.
 
-            metadata = dataset.GetMetadata()  # Extract general metadata
+    Parameters:
+        geotiff_path (str): Path to a directory containing GeoTIFF files or a single GeoTIFF file.
 
-            # geo_transform = dataset.GetGeoTransform()  # Get georeferencing information
-            # projection = dataset.GetProjection()  # Get projection information
+    Returns:
+        list: Transformed metadata from the GeoTIFF file(s).
+        None: If an error occurs or no valid files are found.
+    """
+    if os.path.isdir(geotiff_path):
+        file_paths = [os.path.join(geotiff_path, f) for f in os.listdir(geotiff_path) if f.endswith("_Objects.tif")]
+    else:
+        file_paths = [geotiff_path] if geotiff_path.endswith("_Objects.tif") else []
 
+    if not file_paths:
+        print("No valid '_Objects.tif' files found.")
+        return None
+
+    for file_path in sorted(file_paths):
+        dataset = gdal.Open(file_path)
+        if dataset is None:
+            print(f"Unable to open {file_path}")
+            continue
+
+        # Extract general metadata
+        metadata = dataset.GetMetadata()
+        if 'georef_data' not in metadata:
+            print(f"'georef_data' field missing in metadata for {file_path}")
+            continue
+
+        try:
             data = json.loads(metadata['georef_data'])
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON in 'georef_data' for {file_path}: {e}")
+            continue
 
-            # Initialize a new list for the transformed data
-            transformed_data = []
+        # Initialize a new list for the transformed data
+        transformed_data = []
 
-            # Transform the data
-            for index_, item in enumerate(data):
-                key = list(item.keys())[0]  # Get the first key (like "1,114")
-                coordinates = item[key]  # Get the coordinates
-                score = item['score']  # Get the score
-                label = item['label']  # Get the label
+        # Transform the data
+        for index_, item in enumerate(data):
+            key = list(item.keys())[0]  # Get the first key (like "1,114")
+            coordinates = item[key]  # Get the coordinates
+            score = item['score']  # Get the score
+            label = item['label']  # Get the label
 
-                # Create the new format
-                new_item = {
-                    f"{index_ // 10},{index_ % 10}": coordinates,
-                    "score": score,
-                    "label": label
-                }
+            # Create the new format
+            new_item = {
+                f"{index_ // 10},{index_ % 10}": coordinates,
+                "score": score,
+                "label": label
+            }
 
-                transformed_data.append(new_item)
-            return transformed_data
+            transformed_data.append(new_item)
+        return transformed_data
 
 
 def save_geotiff(output_path_maps_, FileName, data, GTransform, projection):
