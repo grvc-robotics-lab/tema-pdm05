@@ -25,10 +25,11 @@ TEMP_CALLBACK = os.getenv("CALLBACK_NGROK")
 if TEMP_CALLBACK is not None:
     CALLBACK_URL = TEMP_CALLBACK
 else:
-    CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
-
-# Dynamically construct CALLBACK_URL
-# CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
+    # Dynamically construct CALLBACK_URL
+    if PORT is not None:
+        CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
+    else:
+        CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}{BASE_PATH}/{API_ENDPOINT}"
 
 OBJECT_NAME = os.getenv('OBJECT_NAME')
 BROKER_TYPE_ID = os.getenv("BROKER_TYPE_ID")

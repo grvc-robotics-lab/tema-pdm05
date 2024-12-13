@@ -1,11 +1,17 @@
 import config
-from routes import app, socketio, subscribe_to_entities
+from routes import app, socketio, subscribe_to_entities, delete_all_subscriptions, list_subscriptions, \
+    log_active_subscriptions
 from logging_config import logger  # Import the logger from the logging config module
 
 
 if __name__ == "__main__":
     logger.info("Starting the Flask application...")  # Log when the application starts
-    subscribe_to_entities()
+
+    # delete_all_subscriptions()
+    # subscribe_to_entities()
+    # log_active_subscriptions()
+    # list_subscriptions()
+
     host = config.HOST
     port = config.PORT
     logger.info(f"Flask app will run on host: {host}, port: {port}")

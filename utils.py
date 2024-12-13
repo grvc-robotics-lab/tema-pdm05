@@ -37,3 +37,4 @@ def delete_entity(broker_url_, entity_id):
         print(f'Failed to delete entity. Status code: {response.status_code}, Response: {response.text}')
 
 
+
