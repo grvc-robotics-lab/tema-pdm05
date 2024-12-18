@@ -63,8 +63,8 @@ notification_queue = queue.Queue()  # Thread-safe queue for non-Alert notificati
 entities_initialized = False  # Tracks whether initialize_entities has run
 
 
-@app.route(f'{config.BASE_PATH}')
-# @app.route('/')
+# @app.route(f'{config.BASE_PATH}')
+@app.route('/')
 def index():
     return jsonify({"status": "App is running", "message": "Occupancy Grid Estimation System"})
 
@@ -113,11 +113,14 @@ def handle_segmentation(notification):
 
     file_path = f"downloads/drone_imgs/{global_cache.get('natural_disaster', 'No disaster info')}/{mask_id}"
     logger.info(f"path of download {file_path}")
+    print(f"path of download {file_path}")
+
     try:
         # Synchronous file download simulation
         downloaded_file_path = minio_client.download_file(bucket, mask_id, file_path)
         if downloaded_file_path:
             logger.info(f"File downloaded successfully to {downloaded_file_path}")
+            print(f"File downloaded successfully to {downloaded_file_path}")
         else:
             logger.error("File download failed.")
     except Exception as e:
@@ -142,6 +145,8 @@ def process_alert(notification, entity_id):
         try:
             global_cache['roi'] = location['coordinates']
             logger.info(f"ROI set for entity ID {entity_id}: {global_cache['roi']}")
+            print(f"ROI set for entity ID {entity_id}: {global_cache['roi']}")
+
         except Exception as e:
             logger.error(f"Error accessing 'coordinates' for entity ID {entity_id}: {e}")
             global_cache['roi'] = "No disaster info"
@@ -154,6 +159,8 @@ def process_alert(notification, entity_id):
         try:
             global_cache['natural_disaster'] = event_
             logger.info(f"Natural disaster set for entity ID {entity_id}: {global_cache['natural_disaster']}")
+            print(f"Natural disaster set for entity ID {entity_id}: {global_cache['natural_disaster']}")
+
         except Exception as e:
             logger.error(f"Error accessing 'event' value for entity ID {entity_id}: {e}")
             global_cache['natural_disaster'] = "Unknown event"
@@ -171,6 +178,8 @@ def handle_file_download(notification):
             downloaded_file_path = download_file(notification['type'], filename_, bucket)
             if downloaded_file_path:
                 logger.info(f"File downloaded successfully to {downloaded_file_path}")
+                print(f"File downloaded successfully to {downloaded_file_path}")
+
             else:
                 logger.error("File download failed.")
         except Exception as e:
@@ -204,8 +213,8 @@ def download_file(entity_type, filename_, bucket):
         return None
 
 
-@app.route(f'/{config.API_ENDPOINT}', methods=['POST'])
-@app.route(f'/{config.API_ENDPOINT}/', methods=['POST'])
+@app.route('/notify', methods=['POST'])
+# @app.route('/notify/', methods=['POST'])
 def notify():
     try:
         notification_data = request.get_json()
@@ -214,12 +223,16 @@ def notify():
             return jsonify({"error": "Invalid notification data"}), 400
 
         logger.info(f"Notification data received: {notification_data}")
+        print(f"Notification data received: {notification_data}")
+
         executor = ThreadPoolExecutor(max_workers=10)
         futures = []
 
         for notification in notification_data["data"]:
             try:
                 logger.info(f"Processing notification: {notification}")
+                print(f"Processing notification: {notification}")
+
                 # process_notification(notification) # without concurnt processing
                 futures.append(executor.submit(process_notification, notification))
             except Exception as e:
@@ -239,6 +252,8 @@ def notify():
                     global_cache['processing'] = True
                     try:
                         logger.info("Starting initialize_processing() in a new thread")
+                        print("Starting initialize_processing() in a new thread")
+
                         processing_thread = threading.Thread(target=initialize_processing)
                         processing_thread.start()
                     except Exception as e:
@@ -246,8 +261,11 @@ def notify():
                         global_cache['processing'] = False  # Reset on failure
                 else:
                     logger.info("initialize_processing() is already running, skipping.")
+                    print("initialize_processing() is already running, skipping.")
+
             else:
                 logger.info("No relevant natural disaster data, skipping processing.")
+                print("No relevant natural disaster data, skipping processing.")
 
         return jsonify({"status": "Notifications processed successfully"}), 200
 
@@ -265,12 +283,15 @@ def process_notification(notification):
         return
 
     logger.info(f"Processing notification for entity ID: {entity_id}, Entity type: {entity_type}")
+    print(f"Processing notification for entity ID: {entity_id}, Entity type: {entity_type}")
 
     try:
         # Process different entity types accordingly
         if entity_type == "Alert":
             try:
                 logger.info("Triggering Alert entity processing")
+                print("Triggering Alert entity processing")
+
                 process_alert(notification, entity_id)
                 alert_event.set()
             except Exception as e:
@@ -299,6 +320,8 @@ def process_notification(notification):
         if entity_type != "Alert":
             try:
                 logger.info("Setting event for non-Alert entity")
+                print("Setting event for non-Alert entity")
+
                 other_entity_event.set()
             except Exception as e:
                 logger.error(f"Error setting other_entity_event for entity ID {entity_id}: {e}")
@@ -328,11 +351,15 @@ def initialize_processing():
                 except Exception as e:
                     print(f"No OGM for ND due to {e}")
                     logger.info(f"No OGM for ND due to {e}")
+                    print(f"No OGM for ND due to {e}")
+
                 try:
                     estimate_Objects_status()
                 except Exception as e:
                     print(f"No OGM for objects due to {e}")
                     logger.info(f"No OGM for objects due to {e}")
+                    print(f"No OGM for objects due to {e}")
+
                 other_entity_event.clear()  # Reset other_entity_event for future triggers
         except Exception as e:
             logger.error(f"Error during initialize_processing: {e}")

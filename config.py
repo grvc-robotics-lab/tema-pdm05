@@ -24,13 +24,13 @@ TEMP_CALLBACK = os.getenv("CALLBACK_NGROK")
 #
 if TEMP_CALLBACK is not None:
     CALLBACK_URL = TEMP_CALLBACK
-else:
-    # Dynamically construct CALLBACK_URL
-    if PORT is not None:
-        CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
-    else:
-        CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}{BASE_PATH}/{API_ENDPOINT}"
-
+# else:
+#     # Dynamically construct CALLBACK_URL
+#     if PORT is not None:
+#         CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
+#     else:
+#         CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}{BASE_PATH}/{API_ENDPOINT}"
+# # CALLBACK_URL = "https://tema-project.ddns.net/pdm05/notify"
 OBJECT_NAME = os.getenv('OBJECT_NAME')
 BROKER_TYPE_ID = os.getenv("BROKER_TYPE_ID")
 ENTITY_Maps4Flood_ID = os.getenv("BROKER_ENTITY_Maps4Flood_ID")
