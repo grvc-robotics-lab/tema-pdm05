@@ -11,28 +11,37 @@ MINIO_SECRET_KEY = os.getenv('MINIO_SECRET_KEY')
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 
 # Additional Configurations
-PUBLIC_IP_ADDRESS = os.getenv("PUBLIC_IP_ADDRESS")  # New
-BASE_PATH = os.getenv("BASE_PATH")  # New
-API_ENDPOINT = os.getenv("API_ENDPOINT")  # New
+PUBLIC_IP_ADDRESS = os.getenv("PUBLIC_IP_ADDRESS")  # Public IP or domain
+BASE_PATH = os.getenv("BASE_PATH", "/")  # Default to "/"
+API_ENDPOINT = os.getenv("API_ENDPOINT", "notify")  # Default to "notify"
 
 # Application settings
-HOST = os.getenv('HOST')
-DEBUG = os.getenv('DEBUG')
-PORT = os.getenv('PORT')
+HOST = os.getenv('HOST', '0.0.0.0')  # Default to all interfaces
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'  # Convert to boolean
+PORT = os.getenv('PORT', '80')  # Default to port 80 if not set
 
+# TEMP_CALLBACK for testing (e.g., using ngrok)
 TEMP_CALLBACK = os.getenv("CALLBACK_NGROK")
-#
-if TEMP_CALLBACK is not None:
+# Dynamically construct CALLBACK_URL for reverse proxy scenario
+if TEMP_CALLBACK:  # If testing with ngrok
     CALLBACK_URL = TEMP_CALLBACK
-# else:
-#     # Dynamically construct CALLBACK_URL
-#     if PORT is not None:
-#         CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}:{PORT}{BASE_PATH}/{API_ENDPOINT}"
-#     else:
-#         CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}{BASE_PATH}/{API_ENDPOINT}"
-# # CALLBACK_URL = "https://tema-project.ddns.net/pdm05/notify"
-OBJECT_NAME = os.getenv('OBJECT_NAME')
-BROKER_TYPE_ID = os.getenv("BROKER_TYPE_ID")
+else:
+    # Ensure BASE_PATH formatting
+    if not BASE_PATH.startswith('/'):
+        BASE_PATH = '/' + BASE_PATH
+    if BASE_PATH.endswith('/'):
+        BASE_PATH = BASE_PATH[:-1]
+
+    # Construct CALLBACK_URL without a port for reverse proxy
+    CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}{BASE_PATH}/{API_ENDPOINT}"
+
+# Log the constructed CALLBACK_URL for debugging
+print(f"Constructed CALLBACK_URL: {CALLBACK_URL}")
+
+
+# Other configurations
+OBJECT_NAME = os.getenv('OBJECT_NAME', 'default_object.tif')
+BROKER_TYPE_ID = os.getenv("BROKER_TYPE_ID", "GeoTIFF")
 ENTITY_Maps4Flood_ID = os.getenv("BROKER_ENTITY_Maps4Flood_ID")
 ENTITY_Maps4Fire_ID = os.getenv("BROKER_ENTITY_Maps4Fire_ID")
 ENTITY_Maps4Object_ID = os.getenv("BROKER_ENTITY_Maps4Object_ID")

@@ -214,13 +214,25 @@ def download_file(entity_type, filename_, bucket):
 
 
 @app.route('/notify', methods=['POST'])
-# @app.route('/notify/', methods=['POST'])
 def notify():
     try:
         notification_data = request.get_json()
-        if not notification_data or not isinstance(notification_data.get("data", []), list):
-            logger.error("Invalid notification data received.")
-            return jsonify({"error": "Invalid notification data"}), 400
+        # if not notification_data or not isinstance(notification_data.get("data", []), list):
+        #     logger.error("Invalid notification data received.")
+        #     return jsonify({"error": "Invalid notification data"}), 400
+
+        if not isinstance(notification_data, dict):
+            logger.error("Invalid notification data: Expected a JSON object.")
+            return jsonify({"error": "Invalid notification data format"}), 400
+
+        if not isinstance(notification_data.get("data"), list):
+            logger.error("Invalid notification data: 'data' must be a list.")
+            return jsonify({"error": "Invalid notification data format"}), 400
+
+        for notification in notification_data["data"]:
+            if not isinstance(notification, dict):
+                logger.error(f"Invalid notification: Expected a dictionary, got {type(notification)}.")
+                return jsonify({"error": f"Invalid notification format: {notification}"}), 400
 
         logger.info(f"Notification data received: {notification_data}")
         print(f"Notification data received: {notification_data}")
@@ -1140,31 +1152,186 @@ def generate_metadata(occupancy_grid_data, transform):
     return metadata
 
 
-def get_roi(new_polygon_coords, existing_map_path):
+# def get_roi(new_polygon_coords, existing_map_path):
+#     """
+#     Create a GeoTIFF based on new polygon coordinates with a 10-meter resolution.
+#     Check for an existing map, and if none exists, create a new one.
+#
+#     Args:
+#         new_polygon_coords (list): A list of coordinates defining a polygon.
+#         existing_map_path (str): Path to the existing GeoTIFF map.
+#
+#     Returns:
+#         data_set: GDAL dataset of the created or loaded map.
+#     """
+#     try:
+#         # Validate input coordinates
+#         if not new_polygon_coords or not isinstance(new_polygon_coords, list):
+#             raise ValueError("Invalid new_polygon_coords: Must be a non-empty list of [x, y] coordinates.")
+#
+#         # Ensure coordinates form a valid polygon
+#         new_polygon = Polygon(new_polygon_coords)
+#         if not new_polygon.is_valid:
+#             raise ValueError("Invalid polygon: Ensure the coordinates form a valid polygon.")
+#
+#         # Compute bounding box for the polygon
+#         minx, miny, maxx, maxy = new_polygon.bounds
+#         logger.debug(f"Polygon bounds: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
+#
+#         # Check if the existing GeoTIFF exists
+#         if os.path.exists(existing_map_path):
+#             logger.info(f"Existing map found at {existing_map_path}.")
+#             data_set = gdal.Open(existing_map_path, gdal.GA_ReadOnly)
+#             if data_set is None:
+#                 logger.error(f"GDAL failed to open {existing_map_path}.")
+#                 return None
+#             return data_set
+#
+#         # Define the resolution and compute dimensions
+#         resolution = 10  # 10 meters per pixel
+#         width = int((maxx - minx) / resolution)
+#         height = int((maxy - miny) / resolution)
+#         logger.info(f"Creating new GeoTIFF with width={width}, height={height}, resolution=10m.")
+#
+#         # Create an empty occupancy grid
+#         occupancy_grid_data = np.zeros((height, width), dtype=np.uint8)
+#
+#         # Define the affine transform for the GeoTIFF
+#         transform_ = from_bounds(minx, miny, maxx, maxy, width, height)
+#
+#         # Save the new GeoTIFF
+#         try:
+#             with rasterio.open(
+#                     existing_map_path,
+#                     'w',
+#                     driver='GTiff',
+#                     height=occupancy_grid_data.shape[0],
+#                     width=occupancy_grid_data.shape[1],
+#                     count=1,
+#                     dtype=occupancy_grid_data.dtype,
+#                     crs=CRS.from_epsg(4326),  # Assuming WGS84 CRS
+#                     transform=transform_,
+#             ) as dst:
+#                 dst.write(occupancy_grid_data, 1)
+#             logger.info(f"GeoTIFF successfully created at {existing_map_path}.")
+#         except Exception as e:
+#             logger.error(f"Error creating GeoTIFF: {e}")
+#             return None
+#
+#         # Confirm the file was created and return the dataset
+#         if not os.path.exists(existing_map_path):
+#             logger.error(f"Failed to create GeoTIFF: {existing_map_path} not found after writing.")
+#             return None
+#
+#         data_set = gdal.Open(existing_map_path, gdal.GA_ReadOnly)
+#         if data_set is None:
+#             logger.error(f"GDAL failed to open the newly created GeoTIFF at {existing_map_path}.")
+#             return None
+#
+#         return data_set
+#
+#     except ValueError as ve:
+#         logger.error(f"Validation error in get_roi: {ve}")
+#     except Exception as e:
+#         logger.exception(f"Unexpected error in get_roi: {e}")
+#     return None
+
+
+# def convert_to_polygon():
+#     """
+#     Convert an ROI (Region of Interest) from the cache into polygon coordinates.
+#     Returns:
+#         list: Polygon coordinates if successful.
+#         None: If an error occurs.
+#     """
+#     try:
+#         roi = global_cache.get('roi')
+#         if not roi or not isinstance(roi, list):
+#             raise ValueError("ROI is not available or improperly set. Must be a non-empty list.")
+#
+#         # Validate ROI structure
+#         if not all(isinstance(coord, list) and len(coord) == 2 for coord in roi[0]):
+#             raise ValueError("Invalid ROI structure. Each coordinate must be a [x, y] pair.")
+#
+#         polygon = roi[0]
+#         logger.info(f"Retrieved ROI polygon: {polygon}")
+#
+#         # Separate x and y coordinates (longitudes and latitudes)
+#         x_coords = [coord[0] for coord in polygon]  # Longitudes (minx, maxx)
+#         y_coords = [coord[1] for coord in polygon]  # Latitudes (miny, maxy)
+#
+#         # Calculate minx, maxx, miny, maxy
+#         minx = min(x_coords)
+#         maxx = max(x_coords)
+#         miny = min(y_coords)
+#         maxy = max(y_coords)
+#
+#         logger.debug(f"Computed bounds: minx={minx}, maxx={maxx}, miny={miny}, maxy={maxy}")
+#
+#         # Create the polygon coordinates
+#         polygon_coords_ = [
+#             [minx, maxy],  # Top-left
+#             [maxx, maxy],  # Top-right
+#             [maxx, miny],  # Bottom-right
+#             [minx, miny],  # Bottom-left
+#             [minx, maxy]  # Closing the polygon
+#         ]
+#         logger.info(f"Generated polygon coordinates: {polygon_coords_}")
+#         return polygon_coords_
+#     except ValueError as ve:
+#         logger.error(f"Validation error in convert_to_polygon: {ve}")
+#     except Exception as e:
+#         logger.exception(f"Unexpected error in convert_to_polygon: {e}")
+#     return None
+
+
+########################################################################################################################
+# Initialize Entities
+########################################################################################################################
+
+def get_roi(new_polygon_coords, existing_map_path, resolution=100, crs_epsg=4326):
     """
-    Create a GeoTIFF based on new polygon coordinates with a 10-meter resolution.
+    Create a GeoTIFF based on new polygon coordinates with a specified resolution.
     Check for an existing map, and if none exists, create a new one.
 
     Args:
         new_polygon_coords (list): A list of coordinates defining a polygon.
         existing_map_path (str): Path to the existing GeoTIFF map.
+        resolution (int, optional): Resolution in meters per pixel. Defaults to 10.
+        crs_epsg (int, optional): EPSG code for the CRS. Defaults to 4326 (WGS84).
 
     Returns:
-        data_set: GDAL dataset of the created or loaded map.
+        data_set: GDAL dataset of the created or loaded map, or None if an error occurs.
     """
     try:
+        # Validate resolution
+        if resolution <= 0:
+            raise ValueError("Resolution must be a positive, non-zero value.")
+
         # Validate input coordinates
         if not new_polygon_coords or not isinstance(new_polygon_coords, list):
             raise ValueError("Invalid new_polygon_coords: Must be a non-empty list of [x, y] coordinates.")
+        if len(new_polygon_coords) < 3:
+            raise ValueError("Invalid new_polygon_coords: At least three coordinates are required to form a polygon.")
 
         # Ensure coordinates form a valid polygon
         new_polygon = Polygon(new_polygon_coords)
         if not new_polygon.is_valid:
-            raise ValueError("Invalid polygon: Ensure the coordinates form a valid polygon.")
+            new_polygon = new_polygon.buffer(0)  # Attempt to repair the polygon
+            if not new_polygon.is_valid:
+                raise ValueError("Invalid polygon: Ensure the coordinates form a valid polygon.")
 
         # Compute bounding box for the polygon
         minx, miny, maxx, maxy = new_polygon.bounds
+        if maxx == minx or maxy == miny:
+            raise ValueError("Invalid polygon bounds: Polygon must have a non-zero spatial extent.")
+
         logger.debug(f"Polygon bounds: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
+
+        # Compute dimensions
+        width = max(1, int((maxx - minx) / resolution))  # Ensure at least 1 pixel width
+        height = max(1, int((maxy - miny) / resolution))  # Ensure at least 1 pixel height
+        logger.info(f"Creating new GeoTIFF with width={width}, height={height}, resolution={resolution}m.")
 
         # Check if the existing GeoTIFF exists
         if os.path.exists(existing_map_path):
@@ -1174,12 +1341,6 @@ def get_roi(new_polygon_coords, existing_map_path):
                 logger.error(f"GDAL failed to open {existing_map_path}.")
                 return None
             return data_set
-
-        # Define the resolution and compute dimensions
-        resolution = 1  # 10 meters per pixel
-        width = int((maxx - minx) / resolution)
-        height = int((maxy - miny) / resolution)
-        logger.info(f"Creating new GeoTIFF with width={width}, height={height}, resolution=10m.")
 
         # Create an empty occupancy grid
         occupancy_grid_data = np.zeros((height, width), dtype=np.uint8)
@@ -1197,7 +1358,7 @@ def get_roi(new_polygon_coords, existing_map_path):
                     width=occupancy_grid_data.shape[1],
                     count=1,
                     dtype=occupancy_grid_data.dtype,
-                    crs=CRS.from_epsg(4326),  # Assuming WGS84 CRS
+                    crs=CRS.from_epsg(crs_epsg),
                     transform=transform_,
             ) as dst:
                 dst.write(occupancy_grid_data, 1)
@@ -1225,34 +1386,53 @@ def get_roi(new_polygon_coords, existing_map_path):
     return None
 
 
-def convert_to_polygon():
+
+def convert_to_polygon(return_bounding_box=True):
     """
     Convert an ROI (Region of Interest) from the cache into polygon coordinates.
+
+    Args:
+        return_bounding_box (bool): If True, return the bounding box coordinates.
+                                    If False, return the original polygon.
+
     Returns:
-        list: Polygon coordinates if successful.
+        list: Polygon coordinates (bounding box or original polygon).
         None: If an error occurs.
+
+    Expected ROI Format:
+        - global_cache['roi'] should be a list containing a single polygon.
+        - Example:
+          [
+              [[x1, y1], [x2, y2], [x3, y3], [x4, y4], [x1, y1]]
+          ]
     """
     try:
+        # Retrieve ROI from the cache
         roi = global_cache.get('roi')
-        if not roi or not isinstance(roi, list):
-            raise ValueError("ROI is not available or improperly set. Must be a non-empty list.")
+        if not roi or not isinstance(roi, list) or not isinstance(roi[0], list):
+            raise ValueError("ROI is not available or improperly set. Must be a non-empty list of polygons.")
 
-        # Validate ROI structure
-        if not all(isinstance(coord, list) and len(coord) == 2 for coord in roi[0]):
+        # Validate the structure of the first polygon in the ROI
+        roi_polygon = roi[0]
+        if not all(isinstance(coord, list) and len(coord) == 2 for coord in roi_polygon):
             raise ValueError("Invalid ROI structure. Each coordinate must be a [x, y] pair.")
 
-        polygon = roi[0]
-        logger.info(f"Retrieved ROI polygon: {polygon}")
+        # Ensure the polygon is closed
+        if roi_polygon[0] != roi_polygon[-1]:
+            raise ValueError("ROI polygon is not closed. The first and last coordinates must match.")
+
+        logger.info(f"Retrieved ROI polygon: {roi_polygon}")
+
+        if not return_bounding_box:
+            return roi_polygon  # Return the original polygon if requested
 
         # Separate x and y coordinates (longitudes and latitudes)
-        x_coords = [coord[0] for coord in polygon]  # Longitudes (minx, maxx)
-        y_coords = [coord[1] for coord in polygon]  # Latitudes (miny, maxy)
+        x_coords = [coord[0] for coord in roi_polygon]
+        y_coords = [coord[1] for coord in roi_polygon]
 
         # Calculate minx, maxx, miny, maxy
-        minx = min(x_coords)
-        maxx = max(x_coords)
-        miny = min(y_coords)
-        maxy = max(y_coords)
+        minx, maxx = min(x_coords), max(x_coords)
+        miny, maxy = min(y_coords), max(y_coords)
 
         logger.debug(f"Computed bounds: minx={minx}, maxx={maxx}, miny={miny}, maxy={maxy}")
 
@@ -1264,18 +1444,19 @@ def convert_to_polygon():
             [minx, miny],  # Bottom-left
             [minx, maxy]  # Closing the polygon
         ]
+
         logger.info(f"Generated polygon coordinates: {polygon_coords_}")
         return polygon_coords_
+
     except ValueError as ve:
         logger.error(f"Validation error in convert_to_polygon: {ve}")
     except Exception as e:
         logger.exception(f"Unexpected error in convert_to_polygon: {e}")
+
+    # Return None in case of failure
     return None
 
 
-########################################################################################################################
-# Initialize Entities
-########################################################################################################################
 def initialize_entities():
     """Initialize entities based on a natural disaster type and objects."""
     global ND_entity_ID, obj_entity_ID

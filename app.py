@@ -7,7 +7,6 @@ from logging_config import logger  # Import the logger from the logging config m
 if __name__ == "__main__":
     logger.info("Starting the Flask application...")  # Log when the application starts
 
-    # delete_all_subscriptions()
     # subscribe_to_entities()
     # log_active_subscriptions()
     # list_subscriptions()
