@@ -1,14 +1,57 @@
-2024-12-13 18:15:43 - INFO - Starting the Flask application...
-2024-12-13 18:15:43 - DEBUG - Starting new HTTPS connection (1): orion.tema.digital-enabler.eng.it:443
-2024-12-13 18:15:44 - DEBUG - https://orion.tema.digital-enabler.eng.it:443 "GET /ngsi-ld/v1/subscriptions HTTP/11" 200 2
-2024-12-13 18:15:44 - DEBUG - Starting new HTTPS connection (1): orion.tema.digital-enabler.eng.it:443
-2024-12-13 18:15:44 - DEBUG - https://orion.tema.digital-enabler.eng.it:443 "GET /ngsi-ld/v1/subscriptions HTTP/11" 200 2
-2024-12-13 18:15:44 - DEBUG - Starting new HTTPS connection (1): orion.tema.digital-enabler.eng.it:443
-2024-12-13 18:15:44 - DEBUG - https://orion.tema.digital-enabler.eng.it:443 "GET /ngsi-ld/v1/subscriptions HTTP/11" 200 2
-2024-12-13 18:15:44 - INFO - Flask app will run on host: 0.0.0.0, port: 5505
-2024-12-13 18:15:44 - INFO - Starting application...
-2024-12-13 18:15:44 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+2025-01-03 16:12:43 - INFO - Constructed CALLBACK_URL: https://779e-193-147-160-155.ngrok-free.app/notify
+2025-01-03 16:12:43 - DEBUG - All configurations loaded successfully.
+2025-01-03 16:12:44 - DEBUG - Could not import boto3, continuing with reduced functionality.
+2025-01-03 16:12:48 - INFO - Starting the Flask application...
+2025-01-03 16:12:48 - DEBUG - Starting new HTTPS connection (1): orion.tema.digital-enabler.eng.it:443
+2025-01-03 16:12:48 - DEBUG - https://orion.tema.digital-enabler.eng.it:443 "GET /ngsi-ld/v1/subscriptions HTTP/11" 200 1133
+2025-01-03 16:12:48 - INFO - Found existing subscriptions: [{'id': 'urn:ngsi-ld:Subscription:a0f3c41e-c9cd-11ef-9eab-0a580a821b57', 'type': 'Subscription', 'entities': [{'type': 'Alert'}, {'type': 'FloodCalculationResults'}, {'type': 'StandardArrivalTime'}, {'type': 'FireSegmentation'}, {'type': 'BurntSegmentation'}, {'type': 'FloodSegmentation'}, {'type': 'PersonVehicleDetection'}, {'type': 'HotspotResult'}, {'type': 'SinglePostResult'}, {'type': 'EOBurntArea'}], 'watchedAttributes': ['minio_url', 'filename', 'bucket', 'parameters', 'segmentation', 'detection', 'location', 'event', 'effective', 'area'], 'status': 'active', 'isActive': True, 'notification': {'attributes': ['minio_url', 'filename', 'bucket', 'parameters', 'segmentation', 'detection', 'location', 'event', 'effective', 'area'], 'format': 'normalized', 'endpoint': {'uri': 'https://779e-193-147-160-155.ngrok-free.app/notify', 'accept': 'application/json'}, 'status': 'ok', 'timesSent': 5, 'lastNotification': '2025-01-03T15:01:48.094Z', 'lastFailure': '2025-01-03T12:31:03.059Z', 'lastSuccess': '2025-01-03T15:01:48.094Z'}, 'jsonldContext': 'https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.6.jsonld', '@context': 'https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.6.jsonld'}]
+2025-01-03 16:12:48 - DEBUG - Starting new HTTPS connection (1): orion.tema.digital-enabler.eng.it:443
+2025-01-03 16:12:48 - DEBUG - https://orion.tema.digital-enabler.eng.it:443 "PATCH /ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:a0f3c41e-c9cd-11ef-9eab-0a580a821b57 HTTP/11" 204 0
+2025-01-03 16:12:48 - INFO - Subscription urn:ngsi-ld:Subscription:a0f3c41e-c9cd-11ef-9eab-0a580a821b57 updated successfully.
+2025-01-03 16:12:48 - INFO - Flask app will run on host: 0.0.0.0, port: 5505
+2025-01-03 16:12:48 - INFO - Starting application...
+2025-01-03 16:12:48 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
  * Running on all addresses (0.0.0.0)
  * Running on http://127.0.0.1:5505
- * Running on http://192.168.1.114:5505
-2024-12-13 18:15:44 - INFO - [33mPress CTRL+C to quit[0m
+ * Running on http://192.168.0.103:5505
+2025-01-03 16:12:48 - INFO - [33mPress CTRL+C to quit[0m
+2025-01-03 16:13:46 - INFO - 127.0.0.1 - - [03/Jan/2025 16:13:46] "GET / HTTP/1.1" 200 -
+2025-01-03 16:13:53 - INFO - 127.0.0.1 - - [03/Jan/2025 16:13:53] "GET /logs HTTP/1.1" 200 -
+2025-01-03 16:13:55 - INFO - 127.0.0.1 - - [03/Jan/2025 16:13:55] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:13:57 - INFO - 127.0.0.1 - - [03/Jan/2025 16:13:57] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:13:59 - INFO - 127.0.0.1 - - [03/Jan/2025 16:13:59] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:01 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:01] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:03 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:03] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:05 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:05] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:07 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:07] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:09 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:09] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:11 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:11] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:13 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:13] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:15 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:15] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:17 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:17] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:19 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:19] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:21 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:21] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:23 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:23] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:25 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:25] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:27 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:27] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:29 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:29] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:31 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:31] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:33 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:33] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:35 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:35] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:37 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:37] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:39 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:39] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:41 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:41] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:43 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:43] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:45 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:45] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:47 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:47] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:49 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:49] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:51 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:51] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:53 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:53] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:55 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:55] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:57 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:57] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:14:59 - INFO - 127.0.0.1 - - [03/Jan/2025 16:14:59] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:15:01 - INFO - 127.0.0.1 - - [03/Jan/2025 16:15:01] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:15:03 - INFO - 127.0.0.1 - - [03/Jan/2025 16:15:03] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:15:05 - INFO - 127.0.0.1 - - [03/Jan/2025 16:15:05] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:15:07 - INFO - 127.0.0.1 - - [03/Jan/2025 16:15:07] "GET /logs_data HTTP/1.1" 200 -
+2025-01-03 16:15:09 - INFO - 127.0.0.1 - - [03/Jan/2025 16:15:09] "GET /logs_data HTTP/1.1" 200 -

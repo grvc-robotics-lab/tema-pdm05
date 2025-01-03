@@ -69,6 +69,46 @@ def index():
     return jsonify({"status": "App is running", "message": "Occupancy Grid Estimation System"})
 
 
+###################################################################
+
+@app.route('/logs')
+def logs():
+    html_content = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Logs</title>
+        <script>
+            function fetchLogs() {
+                fetch('/logs_data')
+                    .then(response => response.text())
+                    .then(data => {
+                        document.getElementById('log-container').innerText = data;
+                    });
+            }
+            setInterval(fetchLogs, 2000); // Refresh logs every 2 seconds
+        </script>
+    </head>
+    <body>
+        <h1>Application Logs</h1>
+        <pre id="log-container">Loading logs...</pre>
+    </body>
+    </html>
+    '''
+    return html_content
+
+
+@app.route('/logs_data')
+def logs_data():
+    try:
+        with open('app_routes.log', 'r') as log_file:
+            return log_file.read()
+    except FileNotFoundError:
+        return "Log file not found.", 500
+
+
+###################################################################
+
 def handle_person_vehicle_detection(notification, parameters):
     auth_filename = notification.get('parameters', {}).get('value', {}).get('FileName', None)
     detection = notification.get("detection", {}).get('value', {})
@@ -213,14 +253,10 @@ def download_file(entity_type, filename_, bucket):
         return None
 
 
-@app.route('/notify', methods=['POST'])
+@app.route(f'/{config.API_ENDPOINT}', methods=['POST'])
 def notify():
     try:
         notification_data = request.get_json()
-        # if not notification_data or not isinstance(notification_data.get("data", []), list):
-        #     logger.error("Invalid notification data received.")
-        #     return jsonify({"error": "Invalid notification data"}), 400
-
         if not isinstance(notification_data, dict):
             logger.error("Invalid notification data: Expected a JSON object.")
             return jsonify({"error": "Invalid notification data format"}), 400
@@ -245,7 +281,7 @@ def notify():
                 logger.info(f"Processing notification: {notification}")
                 print(f"Processing notification: {notification}")
 
-                # process_notification(notification) # without concurnt processing
+                # process_notification(notification) # without concurrent processing
                 futures.append(executor.submit(process_notification, notification))
             except Exception as e:
                 logger.error(f"Error processing notification {notification}: {e}")
@@ -377,6 +413,81 @@ def initialize_processing():
             logger.error(f"Error during initialize_processing: {e}")
 
 
+# def subscribe_to_entities():
+#     subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"
+#
+#     headers = {
+#         "Content-Type": "application/ld+json",
+#         "Accept": "application/ld+json"
+#     }
+#     subscription_payload = {
+#         "type": "Subscription",
+#         "entities": [
+#             {"type": "Alert"},  # Alert entity by END USER
+#             {"type": "FloodCalculationResults"},  # NS PDM-tech-02 for Flood prediction ---> GeoTIFF
+#             {"type": "StandardArrivalTime"},
+#             {"type": "FireSegmentation"},
+#             {"type": "BurntSegmentation"},
+#             {"type": "FloodSegmentation"},  # AUTH TFA-tech-06 ---> image
+#             {"type": "PersonVehicleDetection"},  # AUTH TFA-tech-05 ---> JSON
+#             {"type": "HotspotResult"},  # PLUS TFA-tech-11 ---> GeoJson
+#             {"type": "SinglePostResult"},  # PLUS TFA-tech-11 ---> GeoJson
+#             {"type": "EOBurntArea"},  # DLR-DFD TFA-tech-09 ---> Satellite
+#         ],
+#         "watchedAttributes": [
+#             "minio_url",
+#             "filename",
+#             "bucket",
+#             "parameters",
+#             "segmentation",
+#             "detection",
+#             "location",
+#             "event",
+#             "effective",
+#             "area"
+#         ],
+#         "notification": {
+#             "attributes":
+#                 [
+#                     "minio_url",
+#                     "filename",
+#                     "bucket",
+#                     "parameters",
+#                     "segmentation",
+#                     "detection",
+#                     "location",
+#                     "event",
+#                     "effective",
+#                     "area"
+#                 ],
+#             "endpoint": {
+#                 "uri": config.CALLBACK_URL,
+#                 "accept": "application/json"
+#             }
+#         },
+#         '@context': ['https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld']
+#     }
+#     print(f"Subscription URL: {subscription_url}")
+#     print(f"Payload: {subscription_payload}")
+#     # Perform the POST request to create the subscription
+#     response_ = requests.post(subscription_url,
+#                               json=subscription_payload,
+#                               headers=headers)
+#
+#     # Check the response
+#     if response_.status_code == 201:
+#         logger.info("Subscription created successfully.")
+#         print("Subscription created successfully.")
+#     else:
+#         print(f"Failed to create subscription. Status code: {response_.status_code}")
+#         logger.info(f"Failed to create subscription. Status code: {response_.status_code}")
+
+import requests
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 def subscribe_to_entities():
     subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"
 
@@ -411,19 +522,18 @@ def subscribe_to_entities():
             "area"
         ],
         "notification": {
-            "attributes":
-                [
-                    "minio_url",
-                    "filename",
-                    "bucket",
-                    "parameters",
-                    "segmentation",
-                    "detection",
-                    "location",
-                    "event",
-                    "effective",
-                    "area"
-                ],
+            "attributes": [
+                "minio_url",
+                "filename",
+                "bucket",
+                "parameters",
+                "segmentation",
+                "detection",
+                "location",
+                "event",
+                "effective",
+                "area"
+            ],
             "endpoint": {
                 "uri": config.CALLBACK_URL,
                 "accept": "application/json"
@@ -431,20 +541,58 @@ def subscribe_to_entities():
         },
         '@context': ['https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld']
     }
-    print(f"Subscription URL: {subscription_url}")
-    print(f"Payload: {subscription_payload}")
+
+    try:
+        # Step 1: Fetch existing subscriptions
+        response = requests.get(subscription_url, headers=headers)
+        if response.status_code != 200:
+            print(f"Error fetching subscriptions. Status: {response.status_code}, Body: {response.text}")
+            logger.error(f"Error fetching subscriptions. Status: {response.status_code}, Body: {response.text}")
+            return
+
+        existing_subscriptions = response.json()
+        if not existing_subscriptions:
+            print("No existing subscriptions found. Creating a new subscription.")
+            logger.info("No existing subscriptions found. Creating a new subscription.")
+            create_subscription(subscription_url, subscription_payload, headers)
+        else:
+            print(f"Found existing subscriptions: {existing_subscriptions}")
+            logger.info(f"Found existing subscriptions: {existing_subscriptions}")
+            for sub in existing_subscriptions:
+                subscription_id = sub.get("id")
+                if not subscription_id:
+                    logger.warning("Subscription found without an ID. Skipping.")
+                    continue
+
+                update_url = f"{subscription_url}/{subscription_id}"
+                update_response = requests.patch(update_url, json=subscription_payload, headers=headers)
+                if update_response.status_code in (200, 204):
+                    logger.info(f"Subscription {subscription_id} updated successfully.")
+                    print(f"Subscription {subscription_id} updated successfully.")
+                else:
+                    logger.error(f"Failed to update subscription {subscription_id}. "
+                                 f"Status: {update_response.status_code}, Body: {update_response.text}")
+                    print(f"Failed to update subscription {subscription_id}. "
+                          f"Status: {update_response.status_code}, Body: {update_response.text}")
+
+    except Exception as e:
+        logger.exception("An error occurred during subscription management.")
+        print(f"An error occurred: {e}")
+
+
+def create_subscription(subscription_url, subscription_payload, headers):
     # Perform the POST request to create the subscription
-    response_ = requests.post(subscription_url,
-                              json=subscription_payload,
-                              headers=headers)
+    response = requests.post(subscription_url,
+                             json=subscription_payload,
+                             headers=headers)
 
     # Check the response
-    if response_.status_code == 201:
+    if response.status_code == 201:
         logger.info("Subscription created successfully.")
         print("Subscription created successfully.")
     else:
-        print(f"Failed to create subscription. Status code: {response_.status_code}")
-        logger.info(f"Failed to create subscription. Status code: {response_.status_code}")
+        print(f"Failed to create subscription. Status code: {response.status_code}")
+        logger.error(f"Failed to create subscription. Status code: {response.status_code}")
 
 
 def estimate_ND_status():
@@ -570,7 +718,7 @@ def polygon_to_pixels(polygon, geo_transform, grid_shape):
     bounds = polygon.bounds
     x_min, y_min = coordinates_to_pixel(geo_transform, bounds[0], bounds[1])
     x_max, y_max = coordinates_to_pixel(geo_transform, bounds[2], bounds[3])
-    
+
     x_min, x_max = max(0, x_min), min(grid_shape[1] - 1, x_max)
     y_min, y_max = max(0, y_min), min(grid_shape[0] - 1, y_max)
     # Iterate through the bounding box
@@ -1384,7 +1532,6 @@ def get_roi(new_polygon_coords, existing_map_path, resolution=100, crs_epsg=4326
     except Exception as e:
         logger.exception(f"Unexpected error in get_roi: {e}")
     return None
-
 
 
 def convert_to_polygon(return_bounding_box=True):
