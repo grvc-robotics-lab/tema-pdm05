@@ -10,7 +10,7 @@ import config
 import geopandas as gpd
 import queue
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_socketio import SocketIO
 from osgeo import gdal, osr, ogr
 from rasterio.features import geometry_mask, rasterize
@@ -33,7 +33,6 @@ from rasterio.transform import from_bounds
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 
 print(config.CALLBACK_URL)
-
 # Initialize Flask app and SocketIO
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -63,29 +62,27 @@ notification_queue = queue.Queue()  # Thread-safe queue for non-Alert notificati
 entities_initialized = False  # Tracks whether initialize_entities has run
 
 
-# @app.route(f'{config.BASE_PATH}')
-@app.route('/')
+@app.route(f'/{config.BASE_PATH}')
 def index():
     return jsonify({"status": "App is running", "message": "Occupancy Grid Estimation System"})
 
 
 ###################################################################
-
-@app.route('/logs')
+@app.route(f'/{config.BASE_PATH}/logs')
 def logs():
-    html_content = '''
+    html_content = f'''
     <!DOCTYPE html>
     <html>
     <head>
         <title>Logs</title>
         <script>
-            function fetchLogs() {
-                fetch('/logs_data')
+            function fetchLogs() {{
+                fetch('/{config.BASE_PATH}/log_data')  // Use the correct route
                     .then(response => response.text())
-                    .then(data => {
+                    .then(data => {{
                         document.getElementById('log-container').innerText = data;
-                    });
-            }
+                    }});
+            }}
             setInterval(fetchLogs, 2000); // Refresh logs every 2 seconds
         </script>
     </head>
@@ -95,16 +92,16 @@ def logs():
     </body>
     </html>
     '''
-    return html_content
+    return Response(html_content, content_type='text/html')
 
 
-@app.route('/logs_data')
+@app.route(f'/{config.BASE_PATH}/log_data')
 def logs_data():
     try:
         with open('app_routes.log', 'r') as log_file:
-            return log_file.read()
+            return log_file.read(), 200
     except FileNotFoundError:
-        return "Log file not found.", 500
+        return "Log file not found.", 404
 
 
 ###################################################################
@@ -253,7 +250,7 @@ def download_file(entity_type, filename_, bucket):
         return None
 
 
-@app.route(f'/{config.API_ENDPOINT}', methods=['POST'])
+@app.route(f'/{config.BASE_PATH}/{config.API_ENDPOINT}', methods=['POST'])
 def notify():
     try:
         notification_data = request.get_json()
@@ -1803,7 +1800,6 @@ def create_entity(entity_ID, entity_type_):
 ########################################################################################################################
 # Update Entity
 ########################################################################################################################
-# @app.route(f'{config.BASE_PATH}/update_entity', methods=['POST'])
 def update_entity(entity_id_, payload):
     response = None
     url_ = f'{config.BROKER_URL}/ngsi-ld/v1/entities/{entity_id_}/attrs'

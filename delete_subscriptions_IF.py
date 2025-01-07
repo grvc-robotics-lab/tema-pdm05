@@ -3,7 +3,7 @@ import requests
 # Configuration
 BROKER_URL = "https://orion.tema.digital-enabler.eng.it/ngsi-ld/v1/subscriptions"
 BROKER_ENTITY_Maps4Fire_ID = "urn:ngsi-ld:USE:PDM-05:Maps4Fire:01"
-CALLBACK_URL = "https://tema-project.ddns.net/pdm05/notify"
+CALLBACK_URL = "https://779e-193-147-160-155.ngrok-free.app/pdm05/notify"
 
 
 def delete_maps4fire_subscriptions():

@@ -24,16 +24,18 @@ if not PUBLIC_IP_ADDRESS:
     logger.error("PUBLIC_IP_ADDRESS environment variable is not set.")
     raise ValueError("PUBLIC_IP_ADDRESS environment variable is not set.")
 BASE_PATH = os.getenv("BASE_PATH", "/").rstrip('/').lstrip('/')
+# BASE_PATH = os.getenv("BASE_PATH", "/").strip('/')
 API_ENDPOINT = os.getenv("API_ENDPOINT", "notify").lstrip('/').rstrip('/')  # Ensure no leading slash
+# API_ENDPOINT = os.getenv("API_ENDPOINT", "notify").strip('/')
 
 # TEMP_CALLBACK for testing (e.g., using ngrok)
 TEMP_CALLBACK = os.getenv("CALLBACK_NGROK")
 # Dynamically construct CALLBACK_URL for reverse proxy scenario
-if TEMP_CALLBACK:  # If testing with ngrok
-    CALLBACK_URL = TEMP_CALLBACK
+if TEMP_CALLBACK:
+    CALLBACK_URL = f"{TEMP_CALLBACK}/{BASE_PATH.strip('/')}/{API_ENDPOINT.strip('/')}"
 else:
-    # Construct CALLBACK_URL without a port for reverse proxy
-    CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}/{BASE_PATH}/{API_ENDPOINT}"
+    CALLBACK_URL = f"https://{PUBLIC_IP_ADDRESS}/{BASE_PATH.strip('/')}/{API_ENDPOINT.strip('/')}"
+
 
 logger.info(f"Constructed CALLBACK_URL: {CALLBACK_URL}")
 
