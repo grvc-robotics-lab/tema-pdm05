@@ -31,6 +31,7 @@ from shapely.ops import transform
 from concurrent.futures import ThreadPoolExecutor
 from rasterio.transform import from_bounds
 from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.transform import rowcol, xy
 
 print(config.CALLBACK_URL)
 # Initialize Flask app and SocketIO
@@ -388,6 +389,20 @@ def initialize_processing():
                 global polygon_coordinates
                 initialize_entities()
                 entities_initialized = True
+                ###########################################################
+                polygon_coordinates = convert_to_polygon()
+                disaster_type = global_cache.get('natural_disaster', 'No disaster info')
+                ogm_path_ND = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
+                print(f"polygon_coordinates --> {polygon_coordinates}")
+                get_roi(polygon_coordinates, ogm_path_ND, resolution=30)
+
+                ogm_path_obj = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
+                get_roi(polygon_coordinates, ogm_path_obj, resolution=10)
+
+                ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
+                # print(type(ogm_metadata))  # Check the type
+                # print("OGM Metadata:", ogm_metadata[:5])  # Print the first 5 entries
+                ###########################################################
                 alert_event.clear()  # Reset Alert event for future triggers
 
             if other_entity_event.is_set() and entities_initialized:
@@ -599,7 +614,7 @@ def estimate_ND_status():
     ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
     roi_data = global_cache.get('roi', None)
 
-    get_roi(polygon_coordinates, ogm_path)
+    get_roi(polygon_coordinates, ogm_path, resolution=30)
     ogm_data, ogm_gt_, ogm_proj = load_image(ogm_path, 0)
     if os.path.isdir("segmented_sat_roi_imgs"):
         if len(os.listdir("segmented_sat_roi_imgs")) == 0:
@@ -789,14 +804,11 @@ def estimate_Objects_status():
     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
     ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
 
-    # try:
-    #     get_geo_dict(
-    #         f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects")
-    # except Exception as e:
-    #     logger.info(f"Geo dictionary creation failed: {e}")
+    # Load or generate the ROI
+    get_roi(polygon_coordinates, ogm_path, resolution=10)
 
     if disaster_type != 'No disaster info':
-        ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects")
+        ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
         if not ogm_metadata:
             logger.error("Failed to load or generate OGM metadata. Aborting process.")
             return
@@ -805,107 +817,119 @@ def estimate_Objects_status():
         # Integrate Drone data
         #######################################################################################
         try:
-            # Load or generate the ROI
-            get_roi(polygon_coordinates, ogm_path)
-
+            # Retrieve observation metadata
             observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images")
+            print("Observation Metadata Type:", type(observ_metadata))
+            print("First Entry of Observation Metadata:", observ_metadata[0] if observ_metadata else "No Data")
+
             if not observ_metadata:
                 logger.info("Drone metadata is empty or not available.")
             else:
+                # Update OGM Metadata
                 ogm_metadata = get_observations_in_FOV(ogm_metadata, observ_metadata)
+                print("Updated OGM Metadata Type:", type(ogm_metadata))
+                print("First Entry of Updated OGM Metadata:", ogm_metadata[0] if ogm_metadata else "No Data")
 
                 # Initialize the Kalman filter
                 state_dim = 3  # For position (x, y, z)
                 measurement_dim = 3  # For measurements (x, y, z)
+                assert state_dim == 3 and measurement_dim == 3, "Kalman filter dimensions mismatch"
                 kf = KalmanFilter(state_dim, measurement_dim)
 
                 # Loop through each observation
-                # for entry in ogm_metadata:
-                #     # Check if the label is not -1
-                #     label = entry.get("label", -1)
-                #     if label != -1:
-                #         # Extract the position (observation)
-                #         position = list(entry.values())[0]  # Get the position data from the first (and only) key
-                #         z = np.array(position).reshape((measurement_dim, 1))  # Reshape for the update step
-                #         # Kalman filter prediction
-                #         kf.predict()
-                #         # Kalman filter update with the observation
-                #         kf.update(z)
-                #         # Update the entry with the new state (updated position)
-                #         updated_position = kf.x.flatten().tolist()  # Get the updated position
-                #         entry[list(entry.keys())[0]] = updated_position  # Update the position in the entry
                 for entry in ogm_metadata:
-                    # Ensure the entry has a valid label
-                    label = entry.get("label", -1)
-                    if label != -1:  # Process entries with valid labels
-                        try:
-                            # Extract the position data
-                            key = next((k for k in entry if isinstance(entry[k], list)), None)
-                            if key:
-                                position = entry[key]  # Position is [lon, lat, elev]
+                    try:
+                        # Ensure the entry has a valid label
+                        label = entry.get("label", -1)
+                        if label == -1:
+                            logger.warning(f"Skipping entry with invalid label: {entry}")
+                            continue
 
-                                # Validate and prepare the position
-                                if len(position) == 3:  # Ensure it has an [x, y, z] format
-                                    z = np.array(position).reshape(
-                                        (measurement_dim, 1))  # Reshape for the Kalman filter
+                        # Extract the position data
+                        key = next((k for k in entry if isinstance(entry[k], list)), None)
+                        if key:
+                            position = entry[key]  # Position is [lon, lat, elev]
+                            print(f"Position Key: {key}, Position: {position}")
 
-                                    # Kalman filter prediction and update
-                                    kf.predict()
-                                    kf.update(z)
+                            # Validate and prepare the position
+                            if len(position) == 3:  # Ensure it has an [x, y, z] format
+                                z = np.array(position).reshape((measurement_dim, 1))  # Reshape for the Kalman filter
+                                kf.predict()
+                                kf.update(z)
 
-                                    # Update the entry with the new state (updated position)
-                                    updated_position = kf.x.flatten().tolist()  # Convert updated state to list
-                                    entry[key] = updated_position  # Update position in the entry
-                                else:
-                                    logger.warning(f"Invalid position format in entry: {position}")
+                                # Update the entry with the new state (updated position)
+                                updated_position = kf.x.flatten().tolist()  # Convert updated state to list
+                                entry[key] = updated_position  # Update position in the entry
+                                print(f"Updated Position: {updated_position}")
                             else:
-                                logger.warning(f"No valid position key found in entry: {entry}")
-                        except Exception as e:
-                            logger.error(f"Error updating Kalman filter for entry {entry}: {e}")
+                                logger.warning(f"Invalid position format in entry: {position}")
+                        else:
+                            logger.warning(f"No valid position key found in entry: {entry}")
+                    except Exception as e:
+                        logger.error(f"Error updating Kalman filter for entry {entry}: {e}")
         except Exception as e:
-            logger.info(f"Object measurements are not available {e}")
+            logger.info(f"Object measurements are not available. Exception: {e}")
+
         #######################################################################################
         # Save updated metadata to JSON
         #######################################################################################
         try:
             metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
+            # Validate ogm_metadata before saving
+            if not isinstance(ogm_metadata, list):
+                raise ValueError("ogm_metadata is not a list.")
+
             with open(metadata_path, 'w') as f:
                 json.dump(ogm_metadata, f, indent=4)
-            logger.info(f"OGM metadata saved to {metadata_path}")
+            logger.info(f"OGM metadata successfully saved to {metadata_path}")
+
+        except ValueError as e:
+            logger.error(f"Validation error for OGM metadata: {e}")
         except Exception as e:
             logger.error(f"Failed to save OGM metadata: {e}")
 
         geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
 
+        # Generate and Save GeoJSON
         try:
             geojson = {"type": "FeatureCollection", "features": []}
-            # Iterate over the custom data and convert to GeoJSON features, skipping zero score/label
+
+            # Iterate through OGM metadata to create GeoJSON features
             for entry in ogm_metadata:
-                for key, coordinates in entry.items():
-                    if isinstance(coordinates, list) and len(
-                            coordinates) == 3:  # Coordinates are a list of [lon, lat, alt]
-                        score = entry.get("score", 0.0)
-                        label = entry.get("label", -1)
+                # Validate each entry
+                geo_coords = entry.get("geo_coords", [])
+                if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
+                    logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
+                    continue
 
-                        if label != -1:
-                            feature = {
-                                "type": "Feature",
-                                "geometry": {
-                                    "type": "Point",
-                                    "coordinates": [coordinates[0], coordinates[1], coordinates[2]]  # Use only lon, lat
-                                },
-                                "properties": {
-                                    "score": score,
-                                    "label": label
-                                }
-                            }
-                            geojson["features"].append(feature)
+                score = entry.get("score", 0.0)
+                label = entry.get("label", -1)
 
-            # Write the result to a GeoJSON file
+                if label == -1:
+                    logger.info(f"Skipping entry with label -1: {entry}")
+                    continue
+
+                # Construct the GeoJSON feature
+                feature = {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [geo_coords[0], geo_coords[1], geo_coords[2]]  # Use lon, lat, elev
+                    },
+                    "properties": {
+                        "score": score,
+                        "label": label
+                    }
+                }
+                geojson["features"].append(feature)
+
+            # Save the GeoJSON
             with open(geojson_path, 'w') as f:
-                json.dump(geojson, f, indent=4)  # Save with indentation for readability
+                json.dump(geojson, f, indent=4)
             logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
 
+        except ValueError as e:
+            logger.error(f"Validation error while creating GeoJSON: {e}")
         except PermissionError as e:
             logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
         except FileNotFoundError as e:
@@ -925,8 +949,12 @@ def estimate_Objects_status():
             logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
 
             # Validate the GeoJSON file
+            if not os.path.exists(geojson_path):
+                raise FileNotFoundError(f"GeoJSON file not found: {geojson_path}")
+
             with open(geojson_path, 'r') as f:
                 geojson_data = json.load(f)
+
             if not geojson_data.get("features", []):
                 raise ValueError("GeoJSON file contains no features. Cannot generate raster.")
 
@@ -934,15 +962,22 @@ def estimate_Objects_status():
             bbox = get_geojson_bbox(geojson_path)  # Function to compute bounding box
             logger.info(f"GeoJSON bounding box: {bbox}")
 
-            # Adjust pixel size based on bounding box
-            pixel_size_lat = 0.0001  # Example default pixel size
-            pixel_size_lon = 0.0001
-            raster_width = (bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon
-            raster_height = (bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat
+            if not bbox or any(k not in bbox for k in ["min_lon", "max_lon", "min_lat", "max_lat"]):
+                raise ValueError(f"Invalid or incomplete bounding box: {bbox}")
+
+            # Calculate pixel size in degrees based on the desired resolution (10 meters per pixel)
+            meters_per_degree = 111320  # Approximate value at the equator
+            pixel_size_lat = 10 / meters_per_degree  # Latitude pixel size in degrees
+            pixel_size_lon = 10 / (meters_per_degree * np.cos(np.radians((bbox["min_lat"] + bbox["max_lat"]) / 2)))
+            logger.info(f"Pixel size (degrees): Lat = {pixel_size_lat}, Lon = {pixel_size_lon}")
+
+            # Calculate raster dimensions
+            raster_width = int((bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon)
+            raster_height = int((bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat)
 
             logger.info(f"Calculated raster size: {raster_width}x{raster_height}")
             if raster_width <= 0 or raster_height <= 0:
-                raise ValueError("Raster size (x_res, y_res) must be greater than 0. Check pixel sizes.")
+                raise ValueError("Raster dimensions must be greater than zero. Check pixel sizes or bounding box.")
 
             # Convert GeoJSON to GeoTIFF
             logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
@@ -953,12 +988,15 @@ def estimate_Objects_status():
                 pixel_size_lon=pixel_size_lon
             )
 
+            # Load the GeoTIFF data
             logger.info(f"Loading GeoTIFF data from {geotiff_path}")
             ogm_data, ogm_gt_, ogm_proj = load_image(geotiff_path, 0)
 
+            # Save the GeoTIFF to the output path
             logger.info(f"Saving GeoTIFF to {output_tiff_path}")
             metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
 
+            # Upload the GeoTIFF to the cloud bucket
             logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
             process_and_upload_ogm(obj_entity_ID, output_tiff_path, config.BUCKET_NAME, metadata)
 
@@ -985,6 +1023,10 @@ def estimate_Objects_status():
             single_post_files = [os.path.join(social_media_dir, f) for f in os.listdir(social_media_dir)
                                  if f.startswith("single_posts_results") and f.endswith(".geojson")]
 
+            if not single_post_files:
+                logger.info("No SinglePostResult files found. Skipping this step.")
+                return
+
             # Process files in chronological order
             single_post_files.sort()  # Process files in chronological order
             logger.info(f"Found {len(single_post_files)} SinglePostResult files.")
@@ -997,10 +1039,7 @@ def estimate_Objects_status():
             # Function to check if coordinates are within OGM bounds and FOV
             def is_within_fov_ogm(gt, lon, lat):
                 try:
-                    # Map geographic coordinates to pixel space
                     x, y = coordinates_to_pixel(gt, lon, lat)
-
-                    # Validate pixel coordinates are within OGM bounds
                     return 0 <= x < ogm_data.shape[1] and 0 <= y < ogm_data.shape[0]
                 except Exception as e:
                     logger.warning(f"FOV check failed for coordinates ({lon}, {lat}): {e}")
@@ -1039,24 +1078,40 @@ def estimate_Objects_status():
                                     # Get the refined position
                                     refined_position = kf.x.flatten().tolist()
 
-                                    # Map the refined position to pixel coordinates
+                                    # Map the refined position to the closest metadata entry
                                     try:
-                                        x, y = coordinates_to_pixel(ogm_gt_, refined_position[0],
-                                                                    refined_position[1])
-                                        if 0 <= x < ogm_data.shape[1] and 0 <= y < ogm_data.shape[0]:
-                                            # Update OGM metadata for the corresponding grid cell
-                                            if "coordinates" not in ogm_metadata[y][x]:
-                                                ogm_metadata[y][x] = {"coordinates": refined_position}
-                                            else:
-                                                ogm_metadata[y][x]["coordinates"] = refined_position
+                                        # Find the closest metadata entry
+                                        closest_entry = None
+                                        min_distance = float('inf')
 
+                                        for entry in ogm_metadata:
+                                            geo_coords = entry.get("geo_coords")
+                                            if not geo_coords or len(geo_coords) != 3:
+                                                continue
+
+                                            distance = np.sqrt(
+                                                (geo_coords[0] - refined_position[0]) ** 2 +
+                                                (geo_coords[1] - refined_position[1]) ** 2
+                                            )
+
+                                            if distance < min_distance:
+                                                min_distance = distance
+                                                closest_entry = entry
+
+                                        # Update the closest entry with the refined position
+                                        if closest_entry and min_distance < 0.0005:  # Define tolerance
+                                            closest_entry["coordinates"] = refined_position
+                                            logger.info(
+                                                f"Updated metadata entry with refined position: {refined_position}")
+                                        else:
+                                            logger.warning(
+                                                f"No close metadata entry found for refined position: {refined_position}")
 
                                     except Exception as e:
                                         logger.warning(
-                                            f"Error mapping refined coordinates ({refined_position}) to pixel: {e}")
+                                            f"Error mapping refined coordinates ({refined_position}) to metadata: {e}")
                                 except Exception as e:
-                                    logger.warning(
-                                        f"Kalman filter update failed for coordinates ({lon}, {lat}): {e}")
+                                    logger.warning(f"Kalman filter update failed for coordinates ({lon}, {lat}): {e}")
 
                     # Delete the file after successful processing
                     os.remove(single_post_file)
@@ -1064,138 +1119,195 @@ def estimate_Objects_status():
 
                 except Exception as e:
                     logger.error(f"Error processing {single_post_file}: {e}")
-
         except Exception as e:
             logger.error(f"Error integrating SinglePostResult data with Kalman filter: {e}")
 
-        #######################################################################################
-        # Save updated metadata to JSON
-        #######################################################################################
-        try:
-            metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
-            with open(metadata_path, 'w') as f:
-                json.dump(ogm_metadata, f, indent=4)
-            logger.info(f"OGM metadata saved to {metadata_path}")
-        except Exception as e:
-            logger.error(f"Failed to save OGM metadata: {e}")
+            #######################################################################################
+            # Save updated metadata to JSON
+            #######################################################################################
+            try:
+                metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
+                # Validate ogm_metadata before saving
+                if not isinstance(ogm_metadata, list):
+                    raise ValueError("ogm_metadata is not a list.")
 
-        geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
+                with open(metadata_path, 'w') as f:
+                    json.dump(ogm_metadata, f, indent=4)
+                logger.info(f"OGM metadata successfully saved to {metadata_path}")
 
-        try:
-            geojson = {"type": "FeatureCollection", "features": []}
-            # Iterate over the custom data and convert to GeoJSON features, skipping zero score/label
-            for entry in ogm_metadata:
-                for key, coordinates in entry.items():
-                    if isinstance(coordinates, list) and len(coordinates) == 3:
-                        score = entry.get("score", 0.0)
-                        label = entry.get("label", -1)
+            except ValueError as e:
+                logger.error(f"Validation error for OGM metadata: {e}")
+            except Exception as e:
+                logger.error(f"Failed to save OGM metadata: {e}")
 
-                        if label != -1:
-                            feature = {
-                                "type": "Feature",
-                                "geometry": {
-                                    "type": "Point",
-                                    "coordinates": [coordinates[0], coordinates[1], coordinates[2]]  # Use only lon, lat
-                                },
-                                "properties": {
-                                    "score": score,
-                                    "label": label
-                                }
-                            }
-                            geojson["features"].append(feature)
+            geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
 
-            # Write the result to a GeoJSON file
-            with open(geojson_path, 'w') as f:
-                json.dump(geojson, f, indent=4)  # Save with indentation for readability
-            logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
+            # Generate and Save GeoJSON
+            try:
+                geojson = {"type": "FeatureCollection", "features": []}
 
-        except PermissionError as e:
-            logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
-        except FileNotFoundError as e:
-            logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
-        except IOError as e:
-            logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
+                # Iterate through OGM metadata to create GeoJSON features
+                for entry in ogm_metadata:
+                    # Validate each entry
+                    geo_coords = entry.get("geo_coords", [])
+                    if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
+                        logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
+                        continue
 
-        #######################################################################################
-        # Convert Geo Json to Geo Tiff
-        #######################################################################################
-        try:
-            geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
-            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+                    score = entry.get("score", 0.0)
+                    label = entry.get("label", -1)
 
-            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
+                    if label == -1:
+                        logger.info(f"Skipping entry with label -1: {entry}")
+                        continue
 
-            # Validate the GeoJSON file
-            with open(geojson_path, 'r') as f:
-                geojson_data = json.load(f)
-            if not geojson_data.get("features", []):
-                raise ValueError("GeoJSON file contains no features. Cannot generate raster.")
+                    # Construct the GeoJSON feature
+                    feature = {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [geo_coords[0], geo_coords[1], geo_coords[2]]  # Use lon, lat, elev
+                        },
+                        "properties": {
+                            "score": score,
+                            "label": label
+                        }
+                    }
+                    geojson["features"].append(feature)
 
-            # Calculate raster size and validate pixel sizes
-            bbox = get_geojson_bbox(geojson_path)  # Function to compute bounding box
-            logger.info(f"GeoJSON bounding box: {bbox}")
+                # Save the GeoJSON
+                with open(geojson_path, 'w') as f:
+                    json.dump(geojson, f, indent=4)
+                logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
 
-            # Adjust pixel size based on bounding box
-            pixel_size_lat = 0.0001  # Example default pixel size
-            pixel_size_lon = 0.0001
-            raster_width = (bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon
-            raster_height = (bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat
+            except ValueError as e:
+                logger.error(f"Validation error while creating GeoJSON: {e}")
+            except PermissionError as e:
+                logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
+            except FileNotFoundError as e:
+                logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
+            except IOError as e:
+                logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
 
-            logger.info(f"Calculated raster size: {raster_width}x{raster_height}")
-            if raster_width <= 0 or raster_height <= 0:
-                raise ValueError("Raster size (x_res, y_res) must be greater than 0. Check pixel sizes.")
+            #######################################################################################
+            # Convert Geo Json to Geo Tiff
+            #######################################################################################
+            try:
+                geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+                output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
 
-            # Convert GeoJSON to GeoTIFF
-            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
-            geojson_to_multi_band_geotiff(
-                geojson_path,
-                geotiff_path,
-                pixel_size_lat=pixel_size_lat,
-                pixel_size_lon=pixel_size_lon
-            )
+                logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
 
-            logger.info(f"Loading GeoTIFF data from {geotiff_path}")
-            ogm_data, ogm_gt_, ogm_proj = load_image(geotiff_path, 0)
+                # Validate the GeoJSON file
+                if not os.path.exists(geojson_path):
+                    raise FileNotFoundError(f"GeoJSON file not found: {geojson_path}")
 
-            logger.info(f"Saving GeoTIFF to {output_tiff_path}")
-            metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
+                with open(geojson_path, 'r') as f:
+                    geojson_data = json.load(f)
 
-            logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
-            process_and_upload_ogm(obj_entity_ID, output_tiff_path, config.BUCKET_NAME, metadata)
+                if not geojson_data.get("features", []):
+                    raise ValueError("GeoJSON file contains no features. Cannot generate raster.")
 
-            logger.info(f"OGM successfully processed and uploaded: {geotiff_path}")
+                # Calculate raster size and validate pixel sizes
+                bbox = get_geojson_bbox(geojson_path)  # Function to compute bounding box
+                logger.info(f"GeoJSON bounding box: {bbox}")
 
-        except FileNotFoundError as e:
-            logger.error(f"File not found during GeoTIFF conversion: {e}")
-        except PermissionError as e:
-            logger.error(f"Permission error during GeoTIFF conversion: {e}")
-        except ValueError as e:
-            logger.error(f"Value error during GeoTIFF conversion: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error during GeoTIFF conversion: {e}")
+                if not bbox or any(k not in bbox for k in ["min_lon", "max_lon", "min_lat", "max_lat"]):
+                    raise ValueError(f"Invalid or incomplete bounding box: {bbox}")
+
+                # Calculate pixel size in degrees based on the desired resolution (10 meters per pixel)
+                meters_per_degree = 111320  # Approximate value at the equator
+                pixel_size_lat = 10 / meters_per_degree  # Latitude pixel size in degrees
+                pixel_size_lon = 10 / (meters_per_degree * np.cos(np.radians((bbox["min_lat"] + bbox["max_lat"]) / 2)))
+                logger.info(f"Pixel size (degrees): Lat = {pixel_size_lat}, Lon = {pixel_size_lon}")
+
+                # Calculate raster dimensions
+                raster_width = int((bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon)
+                raster_height = int((bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat)
+
+                logger.info(f"Calculated raster size: {raster_width}x{raster_height}")
+                if raster_width <= 0 or raster_height <= 0:
+                    raise ValueError("Raster dimensions must be greater than zero. Check pixel sizes or bounding box.")
+
+                # Convert GeoJSON to GeoTIFF
+                logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
+                geojson_to_multi_band_geotiff(
+                    geojson_path,
+                    geotiff_path,
+                    pixel_size_lat=pixel_size_lat,
+                    pixel_size_lon=pixel_size_lon
+                )
+
+                # Load the GeoTIFF data
+                logger.info(f"Loading GeoTIFF data from {geotiff_path}")
+                ogm_data, ogm_gt_, ogm_proj = load_image(geotiff_path, 0)
+
+                # Save the GeoTIFF to the output path
+                logger.info(f"Saving GeoTIFF to {output_tiff_path}")
+                metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
+
+                # Upload the GeoTIFF to the cloud bucket
+                logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
+                process_and_upload_ogm(obj_entity_ID, output_tiff_path, config.BUCKET_NAME, metadata)
+
+                logger.info(f"OGM successfully processed and uploaded: {geotiff_path}")
+
+            except FileNotFoundError as e:
+                logger.error(f"File not found during GeoTIFF conversion: {e}")
+            except PermissionError as e:
+                logger.error(f"Permission error during GeoTIFF conversion: {e}")
+            except ValueError as e:
+                logger.error(f"Value error during GeoTIFF conversion: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error during GeoTIFF conversion: {e}")
 
 
 def get_geojson_bbox(geojson_path):
-    """Calculate the bounding box of a GeoJSON file."""
+    """
+    Calculate the bounding box of a GeoJSON file.
+
+    Parameters:
+        geojson_path (str): Path to the GeoJSON file.
+
+    Returns:
+        dict: Bounding box with min/max longitude and latitude.
+
+    Raises:
+        ValueError: If no valid coordinates are found in the GeoJSON.
+    """
     with open(geojson_path, 'r') as f:
         geojson_data = json.load(f)
 
     coordinates = []
+
     for feature in geojson_data.get("features", []):
         geometry = feature.get("geometry", {})
-        if geometry.get("type") == "Point":
+        geom_type = geometry.get("type")
+
+        if geom_type == "Point":
+            # Append single coordinate
             coordinates.append(geometry["coordinates"])
-        elif geometry.get("type") in ["Polygon", "MultiPolygon"]:
-            # Flatten nested coordinates for polygons
-            coords = geometry["coordinates"]
-            coordinates.extend([coord for polygon in coords for coord in polygon])
+        elif geom_type == "Polygon":
+            # Extract and flatten polygon coordinates
+            for polygon in geometry.get("coordinates", []):
+                coordinates.extend(polygon)
+        elif geom_type == "MultiPolygon":
+            # Extract and flatten multi-polygon coordinates
+            for multi_polygon in geometry.get("coordinates", []):
+                for polygon in multi_polygon:
+                    coordinates.extend(polygon)
 
     if not coordinates:
         raise ValueError("No valid coordinates found in GeoJSON.")
 
-    lons, lats = zip(*coordinates)
+    # Separate longitudes and latitudes
+    try:
+        lons, lats = zip(*coordinates)
+    except ValueError:
+        raise ValueError("Malformed coordinate structure in GeoJSON.")
+
     return {
         "min_lon": min(lons),
         "max_lon": max(lons),
@@ -1297,144 +1409,7 @@ def generate_metadata(occupancy_grid_data, transform):
     return metadata
 
 
-# def get_roi(new_polygon_coords, existing_map_path):
-#     """
-#     Create a GeoTIFF based on new polygon coordinates with a 10-meter resolution.
-#     Check for an existing map, and if none exists, create a new one.
-#
-#     Args:
-#         new_polygon_coords (list): A list of coordinates defining a polygon.
-#         existing_map_path (str): Path to the existing GeoTIFF map.
-#
-#     Returns:
-#         data_set: GDAL dataset of the created or loaded map.
-#     """
-#     try:
-#         # Validate input coordinates
-#         if not new_polygon_coords or not isinstance(new_polygon_coords, list):
-#             raise ValueError("Invalid new_polygon_coords: Must be a non-empty list of [x, y] coordinates.")
-#
-#         # Ensure coordinates form a valid polygon
-#         new_polygon = Polygon(new_polygon_coords)
-#         if not new_polygon.is_valid:
-#             raise ValueError("Invalid polygon: Ensure the coordinates form a valid polygon.")
-#
-#         # Compute bounding box for the polygon
-#         minx, miny, maxx, maxy = new_polygon.bounds
-#         logger.debug(f"Polygon bounds: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
-#
-#         # Check if the existing GeoTIFF exists
-#         if os.path.exists(existing_map_path):
-#             logger.info(f"Existing map found at {existing_map_path}.")
-#             data_set = gdal.Open(existing_map_path, gdal.GA_ReadOnly)
-#             if data_set is None:
-#                 logger.error(f"GDAL failed to open {existing_map_path}.")
-#                 return None
-#             return data_set
-#
-#         # Define the resolution and compute dimensions
-#         resolution = 10  # 10 meters per pixel
-#         width = int((maxx - minx) / resolution)
-#         height = int((maxy - miny) / resolution)
-#         logger.info(f"Creating new GeoTIFF with width={width}, height={height}, resolution=10m.")
-#
-#         # Create an empty occupancy grid
-#         occupancy_grid_data = np.zeros((height, width), dtype=np.uint8)
-#
-#         # Define the affine transform for the GeoTIFF
-#         transform_ = from_bounds(minx, miny, maxx, maxy, width, height)
-#
-#         # Save the new GeoTIFF
-#         try:
-#             with rasterio.open(
-#                     existing_map_path,
-#                     'w',
-#                     driver='GTiff',
-#                     height=occupancy_grid_data.shape[0],
-#                     width=occupancy_grid_data.shape[1],
-#                     count=1,
-#                     dtype=occupancy_grid_data.dtype,
-#                     crs=CRS.from_epsg(4326),  # Assuming WGS84 CRS
-#                     transform=transform_,
-#             ) as dst:
-#                 dst.write(occupancy_grid_data, 1)
-#             logger.info(f"GeoTIFF successfully created at {existing_map_path}.")
-#         except Exception as e:
-#             logger.error(f"Error creating GeoTIFF: {e}")
-#             return None
-#
-#         # Confirm the file was created and return the dataset
-#         if not os.path.exists(existing_map_path):
-#             logger.error(f"Failed to create GeoTIFF: {existing_map_path} not found after writing.")
-#             return None
-#
-#         data_set = gdal.Open(existing_map_path, gdal.GA_ReadOnly)
-#         if data_set is None:
-#             logger.error(f"GDAL failed to open the newly created GeoTIFF at {existing_map_path}.")
-#             return None
-#
-#         return data_set
-#
-#     except ValueError as ve:
-#         logger.error(f"Validation error in get_roi: {ve}")
-#     except Exception as e:
-#         logger.exception(f"Unexpected error in get_roi: {e}")
-#     return None
-
-
-# def convert_to_polygon():
-#     """
-#     Convert an ROI (Region of Interest) from the cache into polygon coordinates.
-#     Returns:
-#         list: Polygon coordinates if successful.
-#         None: If an error occurs.
-#     """
-#     try:
-#         roi = global_cache.get('roi')
-#         if not roi or not isinstance(roi, list):
-#             raise ValueError("ROI is not available or improperly set. Must be a non-empty list.")
-#
-#         # Validate ROI structure
-#         if not all(isinstance(coord, list) and len(coord) == 2 for coord in roi[0]):
-#             raise ValueError("Invalid ROI structure. Each coordinate must be a [x, y] pair.")
-#
-#         polygon = roi[0]
-#         logger.info(f"Retrieved ROI polygon: {polygon}")
-#
-#         # Separate x and y coordinates (longitudes and latitudes)
-#         x_coords = [coord[0] for coord in polygon]  # Longitudes (minx, maxx)
-#         y_coords = [coord[1] for coord in polygon]  # Latitudes (miny, maxy)
-#
-#         # Calculate minx, maxx, miny, maxy
-#         minx = min(x_coords)
-#         maxx = max(x_coords)
-#         miny = min(y_coords)
-#         maxy = max(y_coords)
-#
-#         logger.debug(f"Computed bounds: minx={minx}, maxx={maxx}, miny={miny}, maxy={maxy}")
-#
-#         # Create the polygon coordinates
-#         polygon_coords_ = [
-#             [minx, maxy],  # Top-left
-#             [maxx, maxy],  # Top-right
-#             [maxx, miny],  # Bottom-right
-#             [minx, miny],  # Bottom-left
-#             [minx, maxy]  # Closing the polygon
-#         ]
-#         logger.info(f"Generated polygon coordinates: {polygon_coords_}")
-#         return polygon_coords_
-#     except ValueError as ve:
-#         logger.error(f"Validation error in convert_to_polygon: {ve}")
-#     except Exception as e:
-#         logger.exception(f"Unexpected error in convert_to_polygon: {e}")
-#     return None
-
-
-########################################################################################################################
-# Initialize Entities
-########################################################################################################################
-
-def get_roi(new_polygon_coords, existing_map_path, resolution=100, crs_epsg=4326):
+def get_roi(new_polygon_coords, existing_map_path, resolution, crs_epsg=4326):
     """
     Create a GeoTIFF based on new polygon coordinates with a specified resolution.
     Check for an existing map, and if none exists, create a new one.
@@ -1466,16 +1441,21 @@ def get_roi(new_polygon_coords, existing_map_path, resolution=100, crs_epsg=4326
             if not new_polygon.is_valid:
                 raise ValueError("Invalid polygon: Ensure the coordinates form a valid polygon.")
 
-        # Compute bounding box for the polygon
-        minx, miny, maxx, maxy = new_polygon.bounds
+        # Reproject the polygon to a metric CRS (e.g., EPSG:3857) for proper dimensions in meters
+        metric_crs_epsg = 3857  # Using Web Mercator as an example
+        transformer = Transformer.from_crs(f"EPSG:{crs_epsg}", f"EPSG:{metric_crs_epsg}", always_xy=True)
+        reprojected_polygon = transform(lambda x, y: transformer.transform(x, y), new_polygon)
+
+        # Compute bounding box for the reprojected polygon
+        minx, miny, maxx, maxy = reprojected_polygon.bounds
         if maxx == minx or maxy == miny:
             raise ValueError("Invalid polygon bounds: Polygon must have a non-zero spatial extent.")
 
-        logger.debug(f"Polygon bounds: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
+        logger.debug(f"Reprojected bounds: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
 
-        # Compute dimensions
-        width = max(1, int((maxx - minx) / resolution))  # Ensure at least 1 pixel width
-        height = max(1, int((maxy - miny) / resolution))  # Ensure at least 1 pixel height
+        # Compute dimensions in pixels based on resolution (meters per pixel)
+        width = max(1, int((maxx - minx) / resolution))
+        height = max(1, int((maxy - miny) / resolution))
         logger.info(f"Creating new GeoTIFF with width={width}, height={height}, resolution={resolution}m.")
 
         # Check if the existing GeoTIFF exists
@@ -1503,7 +1483,7 @@ def get_roi(new_polygon_coords, existing_map_path, resolution=100, crs_epsg=4326
                     width=occupancy_grid_data.shape[1],
                     count=1,
                     dtype=occupancy_grid_data.dtype,
-                    crs=CRS.from_epsg(crs_epsg),
+                    crs=CRS.from_epsg(metric_crs_epsg),
                     transform=transform_,
             ) as dst:
                 dst.write(occupancy_grid_data, 1)
@@ -2138,7 +2118,7 @@ def load_existing_geo_dict(tiff_path):
         dict: The loaded geo dictionary if successful.
         None: If the file does not exist, is empty, or cannot be decoded.
     """
-    geo_dict_path = f"{tiff_path}.json"  # Using the same base name with .json extension
+    geo_dict_path = os.path.splitext(tiff_path)[0] + ".json"
 
     if not os.path.exists(geo_dict_path):
         print(f"Geo dictionary file not found: {geo_dict_path}")
@@ -2171,42 +2151,64 @@ def generate_geo_dict_from_tiff(tiff_path):
         tiff_path (str): Path to the GeoTIFF file.
 
     Returns:
-        list: A list of dictionaries with pixel coordinates, geographic coordinates, and elevation.
+        list: A list of dictionaries with pixel coordinates, geographic coordinates (including elevation), and metadata.
         None: If an error occurs.
     """
-    geo_dict_list = []
+    if not os.path.exists(tiff_path):
+        logger.error(f"GeoTIFF file not found: {tiff_path}")
+        return None
+
     try:
+        geo_dict_list = []
+
         # Open the GeoTIFF file
+        logger.debug(f"Opening GeoTIFF file: {tiff_path}")
         with rasterio.open(tiff_path) as dataset:
-            # Ensure the dataset has at least one band
+            logger.debug(f"CRS: {dataset.crs}")
+            logger.debug(f"Width: {dataset.width}, Height: {dataset.height}, Bands: {dataset.count}")
+
             if dataset.count < 1:
                 raise ValueError(f"GeoTIFF file {tiff_path} contains no bands.")
 
-            # Read the elevation data from the first band (assuming its elevation)
+            # Handle CRS
+            if str(dataset.crs).startswith("LOCAL_CS"):
+                logger.warning("CRS is non-standard (LOCAL_CS). Assuming EPSG:3857 for transformations.")
+                dataset_crs = "EPSG:3857"
+            else:
+                dataset_crs = dataset.crs
+
+            # Read elevation data
             elevation_data = dataset.read(1)
+            logger.debug(f"Elevation data shape: {elevation_data.shape}")
 
-            # Loop through each pixel (row, col)
-            for row in range(dataset.height):
-                for col in range(dataset.width):
-                    # Get pixel coordinates as a string (row,col)
-                    pixel_coords = f"{row},{col}"
+            # Handle NoData values (if any)
+            nodata_value = dataset.nodata
+            if nodata_value is not None:
+                mask = elevation_data != nodata_value
+            else:
+                mask = np.ones_like(elevation_data, dtype=bool)
 
-                    # Get the geographic coordinates (longitude, latitude) for the current pixel
-                    lon, lat = dataset.xy(row, col)
+            # Initialize a transformer for coordinate conversion
+            transformer = Transformer.from_crs(dataset_crs, "EPSG:4326", always_xy=True)
 
-                    # Get the elevation value for this pixel and convert to float
-                    elevation = float(elevation_data[row, col])  # Convert numpy.float32 to native Python float
+            # Get pixel indices
+            rows, cols = np.where(mask)
+            xs, ys = dataset.xy(rows, cols)
+            lons, lats = transformer.transform(xs, ys)
 
-                    # Create a dictionary entry for this pixel
-                    geo_dict = {
-                        pixel_coords: [float(lon), float(lat), elevation],  # Ensure lon, lat are also native floats
-                        "score": 0.0,  # Placeholder for score
-                        "label": -1  # Placeholder for label
-                    }
+            # Create the geo dictionary
+            for i in range(len(rows)):
+                pixel_coords = (int(rows[i]), int(cols[i]))
+                elevation = float(elevation_data[rows[i], cols[i]])
+                geo_dict = {
+                    "pixel_coords": pixel_coords,
+                    "geo_coords": [float(lons[i]), float(lats[i]), elevation],  # Include elevation in geo_coords
+                    "score": 0.0,
+                    "label": -1
+                }
+                geo_dict_list.append(geo_dict)
 
-                    # Add the entry to the list of dictionaries
-                    geo_dict_list.append(geo_dict)
-
+        logger.info(f"Generated geo dictionary with {len(geo_dict_list)} entries.")
         return geo_dict_list
 
     except rasterio.errors.RasterioIOError as e:
@@ -2230,27 +2232,51 @@ def get_geo_dict(tiff_path):
     Returns:
         dict: The geo dictionary, either loaded from an existing file or generated anew.
     """
-    # Check if the geo dict already exists
     try:
-        existing_geo_dict = load_existing_geo_dict(tiff_path)
+        # Safely handle paths and extensions
+        base_path, _ = os.path.splitext(tiff_path)
+        tiff_file = f"{base_path}.tif"
+        json_file = f"{base_path}.json"
+
+        # Attempt to load the existing geo dictionary
+        logger.info(f"Checking for existing geo dict: {json_file}")
+        existing_geo_dict = load_existing_geo_dict(json_file)
+
         if existing_geo_dict:
-            print("Using existing geo dict.")
+            logger.info("Using existing geo dict.")
             return existing_geo_dict
 
-        print("Generating new geo dict from the GeoTIFF.")
-        new_geo_dict = generate_geo_dict_from_tiff(f"{tiff_path}.tif")
-
-        if new_geo_dict is None:
-            logger.error(f"Failed to generate geo dict for {tiff_path}.")
+        # Generate a new geo dictionary
+        logger.info(f"Generating new geo dict from {tiff_file}")
+        print(f"Generating new geo dict from {tiff_file}")
+        if not os.path.exists(tiff_file):
+            logger.error(f"GeoTIFF file not found: {tiff_file}")
+            print(f"GeoTIFF file not found: {tiff_file}")
             return None
 
-        tiff_path = tiff_path.split('.')[0]
-        # Save the newly created geo dict for future use
-        with open(f"{tiff_path}.json", 'w') as f:
-            json.dump(new_geo_dict, f, indent=4)  # Save with indentation for readability
-            print(f"Geo dict saved to {tiff_path}")
+        new_geo_dict = generate_geo_dict_from_tiff(tiff_file)
+        if not new_geo_dict:
+            logger.error(f"Failed to generate geo dict for {tiff_file}.")
+            print(f"Failed to generate geo dict for {tiff_file}.")
+            return None
+
+        # Save the generated geo dictionary to JSON
+        try:
+            with open(json_file, 'w') as f:
+                json.dump(new_geo_dict, f, indent=4)
+                logger.info(f"Geo dict saved to {json_file}")
+                print(f"Geo dict saved to {json_file}")
+        except IOError as e:
+            logger.error(f"Failed to save geo dict to {json_file}: {e}")
+            print(f"Failed to save geo dict to {json_file}: {e}")
+            return None
+
         return new_geo_dict
 
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {e}")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decoding error: {e}")
     except IOError as e:
         logger.error(f"I/O error while accessing files for {tiff_path}: {e}")
     except Exception as e:
@@ -2498,28 +2524,41 @@ def get_geotiff_metadata_rasterio(geotiff_path):
         try:
             data = json.loads(metadata['georef_data'])
         except json.JSONDecodeError as e:
-            print(f"Error decoding JSON in 'georef_data' for {file_path}: {e}")
+            logger.error(f"Error decoding JSON in 'georef_data' for {file_path}: {e}")
             continue
 
-        # Initialize a new list for the transformed data
+            # Transform the data
         transformed_data = []
-
-        # Transform the data
         for index_, item in enumerate(data):
-            key = list(item.keys())[0]  # Get the first key (like "1,114")
-            coordinates = item[key]  # Get the coordinates
-            score = item['score']  # Get the score
-            label = item['label']  # Get the label
+            key = list(item.keys())[0]  # Extract the first key (e.g., "1,114")
+            coordinates = item[key]  # Extract geographic coordinates [lon, lat, elevation]
+            score = item.get('score', 0.0)  # Extract score, default to 0.0 if missing
+            label = item.get('label', -1)  # Extract label, default to -1 if missing
 
-            # Create the new format
-            new_item = {
-                f"{index_ // 10},{index_ % 10}": coordinates,
+            # Parse pixel coordinates from the key
+            try:
+                row, col = map(int, key.split(","))
+                pixel_coords = (row, col)  # Convert to tuple
+            except ValueError:
+                logger.warning(f"Invalid pixel coordinate format in key: {key}")
+                continue
+
+            # Build the geo_dict for this entry
+            geo_dict = {
+                "pixel_coords": pixel_coords,
+                "geo_coords": [float(coordinates[0]), float(coordinates[1]), float(coordinates[2])],
+                # Lon, Lat, Elevation
                 "score": score,
                 "label": label
             }
 
-            transformed_data.append(new_item)
-        return transformed_data
+            transformed_data.append(geo_dict)
+
+        if transformed_data:
+            return transformed_data  # Return the transformed data for the first valid file
+
+    logger.info("No metadata extracted from valid files.")
+    return None
 
 
 def save_geotiff(output_path_maps_, FileName, data, GTransform, projection):
@@ -2789,19 +2828,26 @@ def update_occupancy_grid(OGMData, OGM_gt_, observation_data_, observation_gt_):
     return OGMData
 
 
-def is_within_fov(ogm_values, observation_values):
+def is_within_fov(ogm_coords, obs_coords, tolerance=0.001):
     """
-    Check if the observation is within the field of view of the OGM values.
-    Here, we check if the longitude and latitude match or are within a small tolerance.
+    Checks if the observation is within the FOV of the OGM based on geographic coordinates.
+
+    Parameters:
+        ogm_coords (list): [lon, lat, elev] of the OGM entry.
+        obs_coords (list): [lon, lat, elev] of the observation entry.
+        tolerance (float): Allowable distance difference to consider within FOV.
+
+    Returns:
+        bool: True if within FOV, False otherwise.
     """
-    ogm_lon, ogm_lat, _ = ogm_values[:3]  # Extract longitude and latitude
-    obs_lon, obs_lat, _ = observation_values[:3]
+    if len(ogm_coords) != 3 or len(obs_coords) != 3:
+        return False  # Malformed coordinates
 
-    # Define a small tolerance to account for minor differences in coordinate values
-    tolerance = 1e-5
-
-    # Check if the longitude and latitude are within the tolerance
-    return (abs(ogm_lon - obs_lon) <= tolerance) and (abs(ogm_lat - obs_lat) <= tolerance)
+    distance = np.sqrt(
+        (ogm_coords[0] - obs_coords[0]) ** 2 +
+        (ogm_coords[1] - obs_coords[1]) ** 2
+    )
+    return distance <= tolerance
 
 
 def get_observations_in_FOV(georef_ogm, georef_observation):
@@ -2810,69 +2856,53 @@ def get_observations_in_FOV(georef_ogm, georef_observation):
 
     Parameters:
         georef_ogm (list): List of dictionaries representing the occupancy grid map (OGM).
-            Each dictionary contains pixel coordinates as keys and geospatial information,
-            along with "score" and "label".
         georef_observation (list): List of dictionaries representing observations.
-            Similar structure to georef_ogm but represents updated information.
 
     Returns:
         list: Updated occupancy grid with modified "score" and "label" where applicable.
     """
-    # epsilon = 1e-9  # Small value to avoid log(0) or division by zero
     updated_ogm = []
 
-    # Iterate through each OGM entry
     for ogm in georef_ogm:
-        # Create a new dictionary to hold the updated values
         updated_entry = ogm.copy()  # Copy existing entry
 
-        # Extract the pixel key and OGM values
         # Extract pixel key and values
         pixel_key = next((key for key in ogm if key not in ["score", "label"]), None)
-        if not pixel_key:
-            # Skip malformed entries
+        if not pixel_key or pixel_key not in ogm:
+            logger.warning(f"Malformed OGM entry: {ogm}")
             continue
 
         ogm_values = ogm[pixel_key]  # The [lon, lat, elev] values
         prior_probability = ogm.get("score", 0)  # Default to 0 if "score" is missing
         prior_label = ogm.get("label", -1)  # Default to -1 if "label" is missing
 
-        # Initialize updated score
         updated_score = prior_probability
         updated_label = prior_label
         observation_found = False
 
-        # Check if this pixel key exists in the observation
         for obs in georef_observation:
-            # Extract the pixel coordinate from the observation (e.g., "1,114")
-            # obs_pixel_key = [key for key in obs if key not in ["score", "label"]][0]
             obs_pixel_key = next((key for key in obs if key not in ["score", "label"]), None)
-            if not obs_pixel_key:
-                # Skip malformed observation entries
+            if not obs_pixel_key or obs_pixel_key not in obs:
+                logger.warning(f"Malformed observation entry: {obs}")
                 continue
 
-            obs_values = obs[obs_pixel_key]  # The [lon, lat, elev] values
-            obs_score = obs.get("score", 0)  # Likelihood from observation
-            obs_label = obs.get("label", -1)  # Label from observation
+            obs_values = obs[obs_pixel_key]
+            obs_score = obs.get("score", 0)
+            obs_label = obs.get("label", -1)
 
-            # Ensure the pixel keys match and the observation is within the field of view
             if is_within_fov(ogm_values, obs_values):
                 observation_found = True
-                if obs_score > updated_score:  # Update only if observation score is higher
-                    # if obs_score > 0:
+                if obs_score > updated_score or (obs_score == updated_score and obs_label > updated_label):
                     updated_score = obs_score
                     updated_label = obs_label
 
-        # Update the entry only if a relevant observation was found
         if observation_found:
             updated_entry["score"] = np.clip(updated_score, 0, 1)
             updated_entry["label"] = updated_label
         else:
-            # Retain original values if no observation was found
             updated_entry["score"] = prior_probability
             updated_entry["label"] = prior_label
 
-        # Append the updated entry to the updated occupancy grid
         updated_ogm.append(updated_entry)
 
     return updated_ogm
