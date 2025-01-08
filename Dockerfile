@@ -46,7 +46,7 @@ ENV BUCKET_NAME=naples
 ENV PROCESSING_UNIT=cpu
 
 # Callback Configuration 
-ENV PUBLIC_IP_ADDRESS=informationfusion.pagekite.me
+ENV PUBLIC_IP_ADDRESS=tema-project.ddns.net
 ENV BASE_PATH=/pdm05
 ENV API_ENDPOINT=notify
 

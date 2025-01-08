@@ -1,5 +1,5 @@
 import config
-from routes import app, socketio, subscribe_to_entities, delete_all_subscriptions, list_subscriptions, \
+from routes import app, socketio, subscribe_to_entities, list_subscriptions, \
     log_active_subscriptions
 from logging_config import logger  # Import the logger from the logging config module
 

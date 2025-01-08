@@ -9,31 +9,29 @@ import logging
 import config
 import geopandas as gpd
 import queue
+import json
 
 from flask import Flask, request, jsonify, Response
 from flask_socketio import SocketIO
 from osgeo import gdal, osr, ogr
 from rasterio.features import geometry_mask, rasterize
-from rasterio.transform import array_bounds, from_origin
+from rasterio.transform import from_origin, from_bounds, rowcol, xy
 from Kalman_filter_estimating_Objects import KalmanFilter
 from georeferencing_module import main
 from minio_client import MinIOClient
 from logging_config import logger
-from pyproj import CRS
+from pyproj import CRS, Transformer
 from rasterio.windows import Window
 from datetime import datetime
-import json
-from shapely.geometry import Polygon
-from shapely.geometry import box
-from rasterio.mask import mask
-from pyproj import Transformer
+from shapely.geometry import Polygon, box
 from shapely.ops import transform
 from concurrent.futures import ThreadPoolExecutor
-from rasterio.transform import from_bounds
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rasterio.transform import rowcol, xy
+from rasterio.mask import mask
 
 print(config.CALLBACK_URL)
+logger.info(config.CALLBACK_URL)
+
 # Initialize Flask app and SocketIO
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -63,12 +61,12 @@ notification_queue = queue.Queue()  # Thread-safe queue for non-Alert notificati
 entities_initialized = False  # Tracks whether initialize_entities has run
 
 
+###################################################################
 @app.route(f'/{config.BASE_PATH}')
 def index():
     return jsonify({"status": "App is running", "message": "Occupancy Grid Estimation System"})
 
 
-###################################################################
 @app.route(f'/{config.BASE_PATH}/logs')
 def logs():
     html_content = f'''
@@ -103,6 +101,74 @@ def logs_data():
             return log_file.read(), 200
     except FileNotFoundError:
         return "Log file not found.", 404
+
+
+@app.route(f'/{config.BASE_PATH}/{config.API_ENDPOINT}', methods=['POST'])
+def notify():
+    try:
+        notification_data = request.get_json()
+        if not isinstance(notification_data, dict):
+            logger.error("Invalid notification data: Expected a JSON object.")
+            return jsonify({"error": "Invalid notification data format"}), 400
+
+        if not isinstance(notification_data.get("data"), list):
+            logger.error("Invalid notification data: 'data' must be a list.")
+            return jsonify({"error": "Invalid notification data format"}), 400
+
+        for notification in notification_data["data"]:
+            if not isinstance(notification, dict):
+                logger.error(f"Invalid notification: Expected a dictionary, got {type(notification)}.")
+                return jsonify({"error": f"Invalid notification format: {notification}"}), 400
+
+        logger.info(f"Notification data received: {notification_data}")
+        print(f"Notification data received: {notification_data}")
+        executor = ThreadPoolExecutor(max_workers=10)
+        futures = []
+
+        for notification in notification_data["data"]:
+            try:
+                logger.info(f"Processing notification: {notification}")
+                print(f"Processing notification: {notification}")
+
+                # process_notification(notification) # without concurrent processing
+                futures.append(executor.submit(process_notification, notification))
+            except Exception as e:
+                logger.error(f"Error processing notification {notification}: {e}")
+
+        # Wait for all submitted tasks to complete
+        for future in futures:
+            try:
+                future.result()  # Ensure exceptions in threads are raised
+            except Exception as e:
+                logger.error(f"Error in processing notification: {e}")
+
+        with global_cache_lock:
+            # Ensure that initialize_processing() is not already running
+            if global_cache['natural_disaster'] != 'No disaster info':
+                if not global_cache['processing']:
+                    global_cache['processing'] = True
+                    try:
+                        logger.info("Starting initialize_processing() in a new thread")
+                        print("Starting initialize_processing() in a new thread")
+
+                        processing_thread = threading.Thread(target=initialize_processing)
+                        processing_thread.start()
+                    except Exception as e:
+                        logger.error(f"Error in initialize_processing: {e}")
+                        global_cache['processing'] = False  # Reset on failure
+                else:
+                    logger.info("initialize_processing() is already running, skipping.")
+                    print("initialize_processing() is already running, skipping.")
+
+            else:
+                logger.info("No relevant natural disaster data, skipping processing.")
+                print("No relevant natural disaster data, skipping processing.")
+
+        return jsonify({"status": "Notifications processed successfully"}), 200
+
+    except Exception as e:
+        logger.error(f"Unexpected error in notify function: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 ###################################################################
@@ -208,22 +274,103 @@ def process_alert(notification, entity_id):
 
 
 def handle_file_download(notification):
-    filename_ = notification.get('filename')
-    bucket = notification.get("bucket", {})
-
-    if isinstance(filename_, dict) and 'value' in filename_ and isinstance(bucket, dict) and 'value' in bucket:
+    """
+        Handle downloading a file based on notification data.
+        Args:
+            notification (dict): Notification containing file and bucket information.
+        """
+    entity_type = notification.get('type')
+    minio_url = notification.get('minio_url', {}).get('value')
+    data_href = notification.get('data', {}).get('value', {}).get('href')
+    ##########################################################################################################
+    # Handle cases with data.href for EOBurntArea or similar
+    if data_href:
+        logger.info(f"Handling download via data.href for entity type: {entity_type}")
         try:
-            downloaded_file_path = download_file(notification['type'], filename_, bucket)
+            downloaded_file_path = download_file_from_url(entity_type, data_href)
             if downloaded_file_path:
                 logger.info(f"File downloaded successfully to {downloaded_file_path}")
                 print(f"File downloaded successfully to {downloaded_file_path}")
-
             else:
-                logger.error("File download failed.")
+                logger.error("File download via data.href failed.")
         except Exception as e:
-            logger.error(f"Error in downloading file: {e}")
-    else:
+            logger.error(f"Error downloading file via data.href: {e}", exc_info=True)
+        return
+    ##########################################################################################################
+    # Handle cases with minio_url
+    if minio_url:
+        logger.info(f"Handling download via URL for entity type: {entity_type}")
+        try:
+            downloaded_file_path = download_file_from_url(entity_type, minio_url)
+            if downloaded_file_path:
+                logger.info(f"File downloaded successfully to {downloaded_file_path}")
+                print(f"File downloaded successfully to {downloaded_file_path}")
+            else:
+                logger.error("File download via URL failed.")
+        except Exception as e:
+            logger.error(f"Error downloading file via URL: {e}", exc_info=True)
+        return
+    ##########################################################################################################
+    # Handle cases with filename and bucket
+    filename_ = notification.get('filename')
+    bucket = notification.get("bucket")
+    if not (isinstance(filename_, dict) and 'value' in filename_ and
+            isinstance(bucket, dict) and 'value' in bucket):
         logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
+        return
+
+    try:
+        downloaded_file_path = download_file(entity_type, filename_, bucket)
+        if downloaded_file_path:
+            logger.info(f"File downloaded successfully to {downloaded_file_path}")
+            print(f"File downloaded successfully to {downloaded_file_path}")
+        else:
+            logger.error("File download failed.")
+    except Exception as e:
+        logger.error(f"Error in downloading file: {e}", exc_info=True)
+
+
+def download_file_from_url(entity_type, url):
+    """
+    Download a file directly from a URL.
+    Args:
+        entity_type (str): The type of entity triggering the download.
+        url (str): The URL of the file to download.
+    Returns:
+        str: Path to the downloaded file, or None if the download fails.
+    """
+    # Define the base directory structure
+    base_dirs = {
+        "HotspotResult": "downloads/SocialMedia",
+        "SinglePostResult": "downloads/SocialMedia",
+        "UAVTrajectory": "downloads/drone_planning",
+        "StandardArrivalTime": "downloads/FireSim",
+        "FloodCalculationResults": "downloads/FloodSim",
+        "EOBurntArea": "downloads/satellite_imgs"
+    }
+
+    # Get the directory for the entity type
+    download_dir = base_dirs.get(entity_type, "downloads/Other")
+    os.makedirs(download_dir, exist_ok=True)  # Ensure the directory exists
+
+    # Extract the file name from the URL
+    file_name = url.split('/')[-1]
+    file_path = os.path.join(download_dir, file_name)
+
+    try:
+        # Download the file
+        response = requests.get(url, stream=True)
+        response.raise_for_status()  # Raise an error for HTTP errors
+
+        with open(file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        logger.info(f"File downloaded via URL to: {file_path}")
+        return file_path
+    except Exception as e:
+        logger.error(f"Error downloading file from URL {url}: {e}", exc_info=True)
+        return None
 
 
 def download_file(entity_type, filename_, bucket):
@@ -241,83 +388,11 @@ def download_file(entity_type, filename_, bucket):
         file_path = f"downloads/satellite_imgs/{filename_['value']}"
 
     try:
-        if entity_type == "EOBurntArea":
-            return minio_client.download_file('dlr', filename_['value'], file_path)
-        else:
-            return minio_client.download_file(bucket['value'], filename_['value'], file_path)
-
+        logger.info(f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
+        return minio_client.download_file(bucket['value'], filename_['value'], file_path)
     except Exception as e:
         logger.error(f"Error downloading file {filename_['value']} from bucket {bucket['value']}: {e}")
         return None
-
-
-@app.route(f'/{config.BASE_PATH}/{config.API_ENDPOINT}', methods=['POST'])
-def notify():
-    try:
-        notification_data = request.get_json()
-        if not isinstance(notification_data, dict):
-            logger.error("Invalid notification data: Expected a JSON object.")
-            return jsonify({"error": "Invalid notification data format"}), 400
-
-        if not isinstance(notification_data.get("data"), list):
-            logger.error("Invalid notification data: 'data' must be a list.")
-            return jsonify({"error": "Invalid notification data format"}), 400
-
-        for notification in notification_data["data"]:
-            if not isinstance(notification, dict):
-                logger.error(f"Invalid notification: Expected a dictionary, got {type(notification)}.")
-                return jsonify({"error": f"Invalid notification format: {notification}"}), 400
-
-        logger.info(f"Notification data received: {notification_data}")
-        print(f"Notification data received: {notification_data}")
-
-        executor = ThreadPoolExecutor(max_workers=10)
-        futures = []
-
-        for notification in notification_data["data"]:
-            try:
-                logger.info(f"Processing notification: {notification}")
-                print(f"Processing notification: {notification}")
-
-                # process_notification(notification) # without concurrent processing
-                futures.append(executor.submit(process_notification, notification))
-            except Exception as e:
-                logger.error(f"Error processing notification {notification}: {e}")
-
-        # Wait for all submitted tasks to complete
-        for future in futures:
-            try:
-                future.result()  # Ensure exceptions in threads are raised
-            except Exception as e:
-                logger.error(f"Error in processing notification: {e}")
-
-        with global_cache_lock:
-            # Ensure that initialize_processing() is not already running
-            if global_cache['natural_disaster'] != 'No disaster info':
-                if not global_cache['processing']:
-                    global_cache['processing'] = True
-                    try:
-                        logger.info("Starting initialize_processing() in a new thread")
-                        print("Starting initialize_processing() in a new thread")
-
-                        processing_thread = threading.Thread(target=initialize_processing)
-                        processing_thread.start()
-                    except Exception as e:
-                        logger.error(f"Error in initialize_processing: {e}")
-                        global_cache['processing'] = False  # Reset on failure
-                else:
-                    logger.info("initialize_processing() is already running, skipping.")
-                    print("initialize_processing() is already running, skipping.")
-
-            else:
-                logger.info("No relevant natural disaster data, skipping processing.")
-                print("No relevant natural disaster data, skipping processing.")
-
-        return jsonify({"status": "Notifications processed successfully"}), 200
-
-    except Exception as e:
-        logger.error(f"Unexpected error in notify function: {e}")
-        return jsonify({"error": "Internal server error"}), 500
 
 
 def process_notification(notification):
@@ -378,6 +453,8 @@ def process_notification(notification):
 
 def initialize_processing():
     global entities_initialized
+    entities_initialized = False
+
     while True:
         # Wait for alert_event or other_entity_event to be set
         if not (alert_event.is_set() or other_entity_event.is_set()):
@@ -387,6 +464,16 @@ def initialize_processing():
             # Handle Alert-specific instantiation
             if alert_event.is_set():
                 global polygon_coordinates
+                ###########################################################
+                # Delete existing files in the estimated_OGM directory
+                ogm_dir = "estimated_OGM"
+                if os.path.isdir(ogm_dir):
+                    for file in os.listdir(ogm_dir):
+                        file_path = os.path.join(ogm_dir, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                            logger.info(f"Deleted file: {file_path}")
+                ###########################################################
                 initialize_entities()
                 entities_initialized = True
                 ###########################################################
@@ -395,13 +482,10 @@ def initialize_processing():
                 ogm_path_ND = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
                 print(f"polygon_coordinates --> {polygon_coordinates}")
                 get_roi(polygon_coordinates, ogm_path_ND, resolution=30)
-
                 ogm_path_obj = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
                 get_roi(polygon_coordinates, ogm_path_obj, resolution=10)
-
                 ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
-                # print(type(ogm_metadata))  # Check the type
-                # print("OGM Metadata:", ogm_metadata[:5])  # Print the first 5 entries
+                logger.debug(f"OGM Metadata: {ogm_metadata[:5]}")
                 ###########################################################
                 alert_event.clear()  # Reset Alert event for future triggers
 
@@ -423,81 +507,6 @@ def initialize_processing():
                 other_entity_event.clear()  # Reset other_entity_event for future triggers
         except Exception as e:
             logger.error(f"Error during initialize_processing: {e}")
-
-
-# def subscribe_to_entities():
-#     subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"
-#
-#     headers = {
-#         "Content-Type": "application/ld+json",
-#         "Accept": "application/ld+json"
-#     }
-#     subscription_payload = {
-#         "type": "Subscription",
-#         "entities": [
-#             {"type": "Alert"},  # Alert entity by END USER
-#             {"type": "FloodCalculationResults"},  # NS PDM-tech-02 for Flood prediction ---> GeoTIFF
-#             {"type": "StandardArrivalTime"},
-#             {"type": "FireSegmentation"},
-#             {"type": "BurntSegmentation"},
-#             {"type": "FloodSegmentation"},  # AUTH TFA-tech-06 ---> image
-#             {"type": "PersonVehicleDetection"},  # AUTH TFA-tech-05 ---> JSON
-#             {"type": "HotspotResult"},  # PLUS TFA-tech-11 ---> GeoJson
-#             {"type": "SinglePostResult"},  # PLUS TFA-tech-11 ---> GeoJson
-#             {"type": "EOBurntArea"},  # DLR-DFD TFA-tech-09 ---> Satellite
-#         ],
-#         "watchedAttributes": [
-#             "minio_url",
-#             "filename",
-#             "bucket",
-#             "parameters",
-#             "segmentation",
-#             "detection",
-#             "location",
-#             "event",
-#             "effective",
-#             "area"
-#         ],
-#         "notification": {
-#             "attributes":
-#                 [
-#                     "minio_url",
-#                     "filename",
-#                     "bucket",
-#                     "parameters",
-#                     "segmentation",
-#                     "detection",
-#                     "location",
-#                     "event",
-#                     "effective",
-#                     "area"
-#                 ],
-#             "endpoint": {
-#                 "uri": config.CALLBACK_URL,
-#                 "accept": "application/json"
-#             }
-#         },
-#         '@context': ['https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld']
-#     }
-#     print(f"Subscription URL: {subscription_url}")
-#     print(f"Payload: {subscription_payload}")
-#     # Perform the POST request to create the subscription
-#     response_ = requests.post(subscription_url,
-#                               json=subscription_payload,
-#                               headers=headers)
-#
-#     # Check the response
-#     if response_.status_code == 201:
-#         logger.info("Subscription created successfully.")
-#         print("Subscription created successfully.")
-#     else:
-#         print(f"Failed to create subscription. Status code: {response_.status_code}")
-#         logger.info(f"Failed to create subscription. Status code: {response_.status_code}")
-
-import requests
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 def subscribe_to_entities():
@@ -616,9 +625,6 @@ def estimate_ND_status():
 
     get_roi(polygon_coordinates, ogm_path, resolution=30)
     ogm_data, ogm_gt_, ogm_proj = load_image(ogm_path, 0)
-    if os.path.isdir("segmented_sat_roi_imgs"):
-        if len(os.listdir("segmented_sat_roi_imgs")) == 0:
-            get_sate_roi(PolygonCoords=roi_data[0])
 
     # Update OGM with drone data
     try:
@@ -633,8 +639,7 @@ def estimate_ND_status():
     # Update OGM with satellite data
     try:
         observ_sat_data_, observ_sat_gt_, observ_sat_proj = extract_roi_from_satellite_files(
-            "downloads/satellite_imgs/",
-            roi_data)
+            "downloads/satellite_imgs/", roi_data)
         ogm_data = update_occupancy_grid(ogm_data, ogm_gt_, observ_sat_data_, observ_sat_gt_)
     except FileNotFoundError:
         logger.warning("Satellite ROI directory not found.")
@@ -2106,7 +2111,6 @@ def save_cropped_as_geotiff(cropped_gdf, output_path):
 
 
 ########################################################################################################################
-########################################################################################################################
 def load_existing_geo_dict(tiff_path):
     """
     Loads an existing geo dictionary from a JSON file.
@@ -2706,61 +2710,6 @@ def update_occupancy_grid(OGMData, OGM_gt_, observation_data_, observation_gt_):
     Returns:
         np.ndarray: Updated occupancy grid map.
     """
-    # # Determine the size of the grid
-    # epsilon = 1e-9  # Small value to avoid log(0) or division by zero
-    # grid_height, grid_width = OGMData.shape
-    #
-    # for y in range(grid_height):
-    #     for x in range(grid_width):
-    #         # Get the center pixel coordinates of the OGM
-    #         y_geo, x_geo = pixel_to_coordinates(OGM_gt_, x + 0.5, y + 0.5)  # Use the cell center instead of the corner
-    #         # Convert geospatial coordinates to pixel coordinates in satellite image
-    #         ogm_x_axis, ogm_y_axis = coordinates_to_pixel(OGM_gt_, x_geo, y_geo)
-    #         # Convert geospatial coordinates to pixel coordinates in measurement image
-    #         observation_x_axis, observation_y_axis = coordinates_to_pixel(observation_gt_, x_geo, y_geo)
-    #         # Check if the pixel falls within the perceptual field of both images
-    #         if 0 <= ogm_x_axis < OGMData.shape[1] and 0 <= ogm_y_axis < OGMData.shape[0] and \
-    #                 0 <= observation_x_axis < observation_data_.shape[1] and 0 <= observation_y_axis < \
-    #                 observation_data_.shape[0]:
-    #             # Calculate the posterior probability
-    #             # OGMData[ogm_y_axis, ogm_x_axis] is the prior
-    #             prev_x = OGMData[ogm_y_axis, ogm_x_axis]
-    #             # the likelihood is the measurement at this pixel coordinate
-    #             P_z_given_x = observation_data_[observation_y_axis, observation_x_axis]
-    #             if P_z_given_x > 0:
-    #                 P_z_given_not_x = 1 - P_z_given_x
-    #                 P_not_x = 1 - prev_x
-    #                 # Calculate the marginal likelihood P(z)
-    #                 P_z = (P_z_given_x * prev_x) + (P_z_given_not_x * P_not_x)
-    #                 if P_z > 0:
-    #                     # Calculate the posterior probability P(H|z) using Bayes' Theorem
-    #                     posterior_ND = (P_z_given_x * prev_x) / P_z
-    #
-    #                     l_t_i_1 = math.log((prev_x + epsilon) / (1 - prev_x + epsilon))
-    #
-    #                     if posterior_ND > 0:
-    #                         inverse_sensor_model = math.log((posterior_ND + epsilon) / (1 - posterior_ND + epsilon))
-    #                         l_t_i = l_t_i_1 + inverse_sensor_model
-    #                         # Clamp the log-odds to prevent extreme values
-    #                         l_t_i = np.clip(l_t_i, -10, 10)
-    #                         # Update OGMData
-    #                         OGMData[ogm_y_axis, ogm_x_axis] = 1 - (1 / (1 + np.exp(l_t_i)))
-    #                     # else:
-    #                     #     prior = OGMData[ogm_y_axis, ogm_x_axis]
-    #                     #     l_t_i_1 = math.log((prior + epsilon) / (1 - prior + epsilon))
-    #                     #     # Update OGMData
-    #                     #     OGMData[ogm_y_axis, ogm_x_axis] = 1 - (1 / (1 + np.exp(l_t_i_1)))
-    #                     #############################
-    #             else:
-    #                 prior = OGMData[ogm_y_axis, ogm_x_axis]
-    #                 l_t_i_1 = math.log((prior + epsilon) / (1 - prior + epsilon))
-    #                 # OGMData[ogm_y_axis, ogm_x_axis] = l_t_i_1
-    #                 #############################
-    #                 OGMData[ogm_y_axis, ogm_x_axis] = 1 - (1 / (1 + np.exp(l_t_i_1)))
-    #                 #############################
-    #         # Clamp probabilities to ensure they are within [0, 1]
-    #         OGMData[ogm_y_axis, ogm_x_axis] = np.clip(OGMData[ogm_y_axis, ogm_x_axis], 0, 1)
-    # return OGMData
     if not isinstance(OGMData, np.ndarray) or not isinstance(observation_data_, np.ndarray):
         raise ValueError("OGMData and observation_data_ must be numpy arrays.")
     if OGMData.ndim != 2 or observation_data_.ndim != 2:
@@ -2965,18 +2914,25 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
             - observ_sat_gt_ (list): GeoTransform for .jp2 files (None for .gpkg).
             - observ_sat_proj (list): Projection (CRS string) for each file.
     """
-    # Create a Polygon for the ROI
+    # Validate ROI coordinates
+    if not isinstance(roi_coords, list) or not roi_coords or not isinstance(roi_coords[0], list):
+        raise ValueError("ROI coordinates must be a nested list of [lon, lat] pairs.")
+
     try:
-        roi_polygon = Polygon(roi_coords[0])
+        roi_polygon = Polygon(roi_coords[0])  # Create Polygon from the outer ring
     except Exception as e:
         raise ValueError(f"Invalid ROI coordinates: {e}")
+
+    # Validate image path
+    if not os.path.isdir(image_path):
+        raise FileNotFoundError(f"Image path does not exist or is not a directory: {image_path}")
 
     # Initialize results lists
     observ_sat_data_ = []
     observ_sat_gt_ = []
     observ_sat_proj = []
 
-    # Check for satellite files in the directory
+    # Search for satellite files
     satellite_files = [f for f in os.listdir(image_path) if f.endswith((".jp2", ".gpkg"))]
     if not satellite_files:
         print("No satellite files (.jp2 or .gpkg) found in the directory.")
@@ -2986,10 +2942,10 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
         sat_file_path = os.path.join(image_path, sat_file)
         try:
             if sat_file.endswith(".jp2"):
-                # Process .jp2 raster file
                 with rasterio.open(sat_file_path) as src:
                     image_crs = src.crs
-                    print(f"Processing {sat_file} with CRS: {image_crs}")
+                    if image_crs is None:
+                        raise ValueError(f"CRS is missing in file: {sat_file}")
 
                     # Reproject ROI if necessary
                     if str(image_crs) != "EPSG:4326":
@@ -2998,17 +2954,13 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
                     else:
                         roi_polygon_projected = roi_polygon
 
-                    # Crop to ROI
-                    out_image, out_transform = mask(src, [roi_polygon_projected], crop=True)
-                    out_meta = src.meta.copy()
+                    # Check intersection
+                    if not src.bounds.intersects(roi_polygon_projected.bounds):
+                        print(f"ROI does not intersect raster bounds for {sat_file}. Skipping.")
+                        continue
 
-                    # Update metadata for cropped image
-                    out_meta.update({
-                        "driver": "GTiff",
-                        "height": out_image.shape[1],
-                        "width": out_image.shape[2],
-                        "transform": out_transform
-                    })
+                    # Crop raster to ROI
+                    out_image, out_transform = mask(src, [roi_polygon_projected], crop=True)
 
                     # Upscale raster to 1 meter per pixel resolution
                     target_resolution = 1  # 1 meter per pixel
@@ -3017,7 +2969,6 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
                         *src.bounds, resolution=target_resolution)
 
                     upscaled_image = np.empty((src.count, height, width), dtype=src.dtypes[0])
-
                     reproject(
                         source=out_image,
                         destination=upscaled_image,
@@ -3029,14 +2980,17 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
                     )
 
                     # Append results
-                    observ_sat_data_.append(out_image)
-                    observ_sat_gt_.append(out_transform)
+                    observ_sat_data_.append(upscaled_image)
+                    observ_sat_gt_.append(transform_)
                     observ_sat_proj.append(src.crs.to_string())
 
             elif sat_file.endswith(".gpkg"):
-                # Process .gpkg vector file
-                print(f"Processing {sat_file} as a vector dataset.")
                 gdf = gpd.read_file(sat_file_path)
+                if gdf.empty:
+                    print(f"No data in {sat_file}. Skipping.")
+                    continue
+                if gdf.crs is None:
+                    raise ValueError(f"CRS missing in {sat_file}")
 
                 # Reproject ROI if necessary
                 if gdf.crs.to_string() != "EPSG:4326":
@@ -3047,7 +3001,6 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
                 clipped_gdf = gpd.overlay(gdf, roi_gdf, how="intersection")
 
                 if not clipped_gdf.empty:
-                    # Append results
                     observ_sat_data_.append(clipped_gdf)
                     observ_sat_gt_.append(None)  # No GeoTransform for vector data
                     observ_sat_proj.append(gdf.crs.to_string())
@@ -3057,7 +3010,7 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
         except Exception as e:
             print(f"Error processing {sat_file}: {e}")
 
-        # Delete the processed satellite file
+        # Attempt to delete processed file
         try:
             os.remove(sat_file_path)
             print(f"Deleted processed file: {sat_file}")
