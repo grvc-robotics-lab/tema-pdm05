@@ -2,6 +2,7 @@ import requests
 import json
 from datetime import datetime, timedelta, timezone
 
+
 def create_entity():
     url = 'https://orion.tema.digital-enabler.eng.it/ngsi-ld/v1/entities'
 
@@ -46,13 +47,26 @@ def create_entity():
                 "type": "Polygon",
                 "coordinates": [
                     [
-                        [8.629761, 40.181759],
-                        [8.702888, 40.194348],
-                        [8.736877, 40.14004],
-                        [8.651047, 40.098559],
-                        [8.570709, 40.130591],
-                        [8.598862, 40.171004],
-                        [8.629761, 40.181759]
+                        [
+                            8.64212,
+                            40.122191
+                        ],
+                        [
+                            8.64212,
+                            40.157623
+                        ],
+                        [
+                            8.673706,
+                            40.157623
+                        ],
+                        [
+                            8.673706,
+                            40.122191
+                        ],
+                        [
+                            8.64212,
+                            40.122191
+                        ]
                     ]
                 ]
             }
@@ -101,13 +115,26 @@ def create_entity():
                 "type": "Polygon",
                 "coordinates": [
                     [
-                        [8.629761, 40.181759],
-                        [8.702888, 40.194348],
-                        [8.736877, 40.14004],
-                        [8.651047, 40.098559],
-                        [8.570709, 40.130591],
-                        [8.598862, 40.171004],
-                        [8.629761, 40.181759]
+                        [
+                            8.64212,
+                            40.122191
+                        ],
+                        [
+                            8.64212,
+                            40.157623
+                        ],
+                        [
+                            8.673706,
+                            40.157623
+                        ],
+                        [
+                            8.673706,
+                            40.122191
+                        ],
+                        [
+                            8.64212,
+                            40.122191
+                        ]
                     ]
                 ]
             }
@@ -125,6 +152,7 @@ def create_entity():
     else:
         print(f"Failed to create entity: {response_.status_code} - {response_.text}")
         return {"status": "Error"}, 500
+
 
 def update_entity(entity_id_):
     url_ = f'https://orion.tema.digital-enabler.eng.it/ngsi-ld/v1/entities/{entity_id_}/attrs'
@@ -165,6 +193,7 @@ def update_entity(entity_id_):
         print(f"Error occurred while updating entity {entity_id_}: {e}")
 
     return None
+
 
 create_entity()
 update_entity("urn:ngsi-ld:Alert:100")
