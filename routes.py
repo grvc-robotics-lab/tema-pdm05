@@ -28,6 +28,7 @@ from shapely.ops import transform
 from concurrent.futures import ThreadPoolExecutor
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.mask import mask
+from threading import Thread, Lock
 
 print(config.CALLBACK_URL)
 logger.info(config.CALLBACK_URL)
@@ -59,6 +60,8 @@ alert_event = threading.Event()  # Event triggered by Alert notifications
 other_entity_event = threading.Event()  # Event triggered by other notifications
 notification_queue = queue.Queue()  # Thread-safe queue for non-Alert notifications
 entities_initialized = False  # Tracks whether initialize_entities has run
+is_processing = False
+processing_lock = Lock()
 
 
 ###################################################################
@@ -120,15 +123,13 @@ def notify():
                 logger.error(f"Invalid notification: Expected a dictionary, got {type(notification)}.")
                 return jsonify({"error": f"Invalid notification format: {notification}"}), 400
 
-        logger.info(f"Notification data received: {notification_data}")
-        print(f"Notification data received: {notification_data}")
         executor = ThreadPoolExecutor(max_workers=10)
         futures = []
 
         for notification in notification_data["data"]:
             try:
-                logger.info(f"Processing notification: {notification}")
-                print(f"Processing notification: {notification}")
+                logger.info(f"Processing notification: {notification['type']}")
+                print(f"Processing notification: {notification['type']}")
 
                 # process_notification(notification) # without concurrent processing
                 futures.append(executor.submit(process_notification, notification))
@@ -172,6 +173,78 @@ def notify():
 
 
 ###################################################################
+
+#######################################################################
+# @app.route(f'/{config.BASE_PATH}/{config.API_ENDPOINT}', methods=['POST'])
+# def notify():
+#     try:
+#         notification_data = request.get_json()
+#         if not isinstance(notification_data, dict):
+#             logger.error("Invalid notification data: Expected a JSON object.")
+#             return jsonify({"error": "Invalid notification data format"}), 400
+#
+#         if not isinstance(notification_data.get("data"), list):
+#             logger.error("Invalid notification data: 'data' must be a list.")
+#             return jsonify({"error": "Invalid notification data format"}), 400
+#
+#         for notification in notification_data["data"]:
+#             if not isinstance(notification, dict):
+#                 logger.error(f"Invalid notification: Expected a dictionary, got {type(notification)}.")
+#                 return jsonify({"error": f"Invalid notification format: {notification}"}), 400
+#
+#         # Add notifications to the queue
+#         for notification in notification_data["data"]:
+#             notification_queue.put(notification)
+#             logger.info(f"Notification added to the queue: {notification}")
+#
+#         # Start the worker thread if not already running
+#         with processing_lock:
+#             if not is_processing:
+#                 logger.info("Starting the notification processing thread.")
+#                 Thread(target=process_notification_queue, daemon=True).start()
+#
+#         return jsonify({"status": "Notifications queued successfully"}), 200
+#
+#     except Exception as e:
+#         logger.error(f"Unexpected error in notify function: {e}")
+#         return jsonify({"error": "Internal server error"}), 500
+#
+#
+# def process_notification_queue():
+#     global is_processing
+#     with processing_lock:
+#         is_processing = True
+#
+#     try:
+#         while not notification_queue.empty():
+#             notification = notification_queue.get()
+#             try:
+#                 logger.info(f"Processing notification: {notification}")
+#                 process_notification(notification)  # Call the actual processing function
+#             except Exception as e:
+#                 logger.error(f"Error processing notification {notification}: {e}")
+#             finally:
+#                 notification_queue.task_done()
+#
+#         # Trigger initialize_processing if necessary
+#         if global_cache['natural_disaster'] != 'No disaster info':
+#             with global_cache_lock:
+#                 if not global_cache['processing']:
+#                     global_cache['processing'] = True
+#                     try:
+#                         logger.info("Starting initialize_processing.")
+#                         initialize_processing()  # Execute the initialize_processing logic
+#                     except Exception as e:
+#                         logger.error(f"Error in initialize_processing: {e}")
+#                         global_cache['processing'] = False  # Reset on failure
+#     except Exception as e:
+#         logger.error(f"Error in processing notification queue: {e}")
+#     finally:
+#         with processing_lock:
+#             is_processing = False
+#
+
+#######################################################################
 
 def handle_person_vehicle_detection(notification, parameters):
     auth_filename = notification.get('parameters', {}).get('value', {}).get('FileName', None)
@@ -227,6 +300,8 @@ def handle_segmentation(notification):
             print(f"File downloaded successfully to {downloaded_file_path}")
         else:
             logger.error("File download failed.")
+
+
     except Exception as e:
         logger.error(f"Error downloading file for mask_id {mask_id}: {e}")
         return
@@ -447,14 +522,18 @@ def process_notification(notification):
             except Exception as e:
                 logger.error(f"Error setting other_entity_event for entity ID {entity_id}: {e}")
 
+        try:
+            main(global_cache.get('natural_disaster', 'No disaster info'))
+            logger.info(f"Geo referencing is done correctly")
+        except Exception as e:
+            logger.error(f"Issue in geo-referencing due to {e}")
+
     except Exception as e:
         logger.error(f"Error processing notification {entity_id} of type {entity_type}: {e}")
 
 
 def initialize_processing():
     global entities_initialized
-    entities_initialized = False
-
     while True:
         # Wait for alert_event or other_entity_event to be set
         if not (alert_event.is_set() or other_entity_event.is_set()):
@@ -509,6 +588,98 @@ def initialize_processing():
             logger.error(f"Error during initialize_processing: {e}")
 
 
+############################################################
+# def initialize_processing():
+#     global entities_initialized
+#     entities_initialized = False
+#     stop_event = threading.Event()  # Use this for graceful shutdown
+#
+#     while not stop_event.is_set():
+#         try:
+#             # Wait for either alert_event or other_entity_event to be set
+#             if not (alert_event.is_set() or other_entity_event.is_set()):
+#                 time.sleep(0.1)  # Sleep briefly to reduce busy-waiting
+#                 continue
+#
+#             if alert_event.is_set():
+#                 process_alert_event()
+#
+#             if other_entity_event.is_set() and entities_initialized:
+#                 process_other_entity_event()
+#         except Exception as e:
+#             logger.error(f"Error during initialize_processing: {e}")
+#             time.sleep(1)  # Prevent tight error-looping
+#
+#
+# def process_alert_event():
+#     """Handle the logic triggered by alert_event."""
+#     global polygon_coordinates, entities_initialized
+#
+#     try:
+#         logger.info("Starting alert event processing.")
+#
+#         # Cleanup estimated_OGM directory
+#         ogm_dir = "estimated_OGM"
+#         cleanup_directory(ogm_dir)
+#
+#         initialize_entities()
+#         entities_initialized = True
+#
+#         # Process polygon coordinates and OGM
+#         polygon_coordinates = convert_to_polygon()
+#         disaster_type = global_cache.get('natural_disaster', 'No disaster info')
+#         logger.info(f"Processing disaster type: {disaster_type}")
+#
+#         ogm_path_ND = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
+#         get_roi(polygon_coordinates, ogm_path_ND, resolution=30)
+#
+#         ogm_path_obj = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
+#         get_roi(polygon_coordinates, ogm_path_obj, resolution=10)
+#
+#         ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
+#         logger.debug(f"OGM Metadata: {ogm_metadata[:5]}")
+#
+#         alert_event.clear()  # Reset Alert event for future triggers
+#         logger.info("Alert event processing completed.")
+#     except Exception as e:
+#         logger.error(f"Error handling alert event: {e}")
+#
+#
+# def process_other_entity_event():
+#     """Handle the logic triggered by other_entity_event."""
+#     try:
+#         logger.info("Starting other entity event processing.")
+#
+#         try:
+#             estimate_ND_status()
+#         except Exception as e:
+#             logger.info(f"No OGM for ND due to {e}")
+#
+#         try:
+#             estimate_Objects_status()
+#         except Exception as e:
+#             logger.info(f"No OGM for objects due to {e}")
+#
+#         other_entity_event.clear()  # Reset other_entity_event for future triggers
+#         logger.info("Other entity event processing completed.")
+#     except Exception as e:
+#         logger.error(f"Error handling other entity event: {e}")
+#
+#
+# def cleanup_directory(directory):
+#     """Delete all files in the specified directory."""
+#     try:
+#         if os.path.isdir(directory):
+#             for file in os.listdir(directory):
+#                 file_path = os.path.join(directory, file)
+#                 if os.path.isfile(file_path):
+#                     os.remove(file_path)
+#                     logger.info(f"Deleted file: {file_path}")
+#     except Exception as e:
+#         logger.error(f"Error cleaning up directory {directory}: {e}")
+
+
+############################################################
 def subscribe_to_entities():
     subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"
 
@@ -516,45 +687,9 @@ def subscribe_to_entities():
         "Content-Type": "application/ld+json",
         "Accept": "application/ld+json"
     }
-    subscription_payload = {
+    subscription_payload_template = {
         "type": "Subscription",
-        "entities": [
-            {"type": "Alert"},  # Alert entity by END USER
-            {"type": "FloodCalculationResults"},  # NS PDM-tech-02 for Flood prediction ---> GeoTIFF
-            {"type": "StandardArrivalTime"},
-            {"type": "FireSegmentation"},
-            {"type": "BurntSegmentation"},
-            {"type": "FloodSegmentation"},  # AUTH TFA-tech-06 ---> image
-            {"type": "PersonVehicleDetection"},  # AUTH TFA-tech-05 ---> JSON
-            {"type": "HotspotResult"},  # PLUS TFA-tech-11 ---> GeoJson
-            {"type": "SinglePostResult"},  # PLUS TFA-tech-11 ---> GeoJson
-            {"type": "EOBurntArea"},  # DLR-DFD TFA-tech-09 ---> Satellite
-        ],
-        "watchedAttributes": [
-            "minio_url",
-            "filename",
-            "bucket",
-            "parameters",
-            "segmentation",
-            "detection",
-            "location",
-            "event",
-            "effective",
-            "area"
-        ],
         "notification": {
-            "attributes": [
-                "minio_url",
-                "filename",
-                "bucket",
-                "parameters",
-                "segmentation",
-                "detection",
-                "location",
-                "event",
-                "effective",
-                "area"
-            ],
             "endpoint": {
                 "uri": config.CALLBACK_URL,
                 "accept": "application/json"
@@ -563,8 +698,20 @@ def subscribe_to_entities():
         '@context': ['https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld']
     }
 
+    entity_types_with_ids = {
+        "Alert": "urn:ngsi-ld:tema:subscription:USE:PDM05:011",
+        "FloodCalculationResults": "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
+        "StandardArrivalTime": "urn:ngsi-ld:tema:subscription:USE:PDM05:003",
+        "FireSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:004",
+        "BurntSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:005",
+        "FloodSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:006",
+        "PersonVehicleDetection": "urn:ngsi-ld:tema:subscription:USE:PDM05:007",
+        "HotspotResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:008",
+        "SinglePostResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:009",
+        "EOBurntArea": "urn:ngsi-ld:tema:subscription:USE:PDM05:010"
+    }
+
     try:
-        # Step 1: Fetch existing subscriptions
         response = requests.get(subscription_url, headers=headers)
         if response.status_code != 200:
             print(f"Error fetching subscriptions. Status: {response.status_code}, Body: {response.text}")
@@ -572,48 +719,41 @@ def subscribe_to_entities():
             return
 
         existing_subscriptions = response.json()
-        if not existing_subscriptions:
-            print("No existing subscriptions found. Creating a new subscription.")
-            logger.info("No existing subscriptions found. Creating a new subscription.")
-            create_subscription(subscription_url, subscription_payload, headers)
-        else:
-            print(f"Found existing subscriptions: {existing_subscriptions}")
-            logger.info(f"Found existing subscriptions: {existing_subscriptions}")
-            for sub in existing_subscriptions:
-                subscription_id = sub.get("id")
-                if not subscription_id:
-                    logger.warning("Subscription found without an ID. Skipping.")
-                    continue
+        existing_subscription_ids = {sub.get("id") for sub in existing_subscriptions}
 
-                update_url = f"{subscription_url}/{subscription_id}"
-                update_response = requests.patch(update_url, json=subscription_payload, headers=headers)
-                if update_response.status_code in (200, 204):
-                    logger.info(f"Subscription {subscription_id} updated successfully.")
-                    print(f"Subscription {subscription_id} updated successfully.")
-                else:
-                    logger.error(f"Failed to update subscription {subscription_id}. "
-                                 f"Status: {update_response.status_code}, Body: {update_response.text}")
-                    print(f"Failed to update subscription {subscription_id}. "
-                          f"Status: {update_response.status_code}, Body: {update_response.text}")
+        for entity_type, subscription_id in entity_types_with_ids.items():
+            if subscription_id in existing_subscription_ids:
+                print(f"Subscription for {entity_type} with ID {subscription_id} already exists.")
+                logger.info(f"Subscription for {entity_type} with ID {subscription_id} already exists.")
+                continue
+
+            # Prepare subscription payload for the specific entity
+            subscription_payload = subscription_payload_template.copy()
+            subscription_payload["id"] = subscription_id
+            subscription_payload["entities"] = [{"type": entity_type}]
+
+            # Create new subscription
+            create_subscription(subscription_url, subscription_payload, headers)
 
     except Exception as e:
         logger.exception("An error occurred during subscription management.")
         print(f"An error occurred: {e}")
 
 
-def create_subscription(subscription_url, subscription_payload, headers):
-    # Perform the POST request to create the subscription
-    response = requests.post(subscription_url,
-                             json=subscription_payload,
-                             headers=headers)
-
-    # Check the response
-    if response.status_code == 201:
-        logger.info("Subscription created successfully.")
-        print("Subscription created successfully.")
-    else:
-        print(f"Failed to create subscription. Status code: {response.status_code}")
-        logger.error(f"Failed to create subscription. Status code: {response.status_code}")
+def create_subscription(subscription_url, payload, headers):
+    try:
+        response = requests.post(subscription_url, json=payload, headers=headers)
+        if response.status_code in (200, 201):
+            print(f"Subscription {payload['id']} created successfully.")
+            logger.info(f"Subscription {payload['id']} created successfully.")
+        else:
+            print(
+                f"Failed to create subscription {payload['id']}. Status: {response.status_code}, Body: {response.text}")
+            logger.error(
+                f"Failed to create subscription {payload['id']}. Status: {response.status_code}, Body: {response.text}")
+    except Exception as e:
+        logger.exception("An error occurred while creating the subscription.")
+        print(f"An error occurred while creating the subscription: {e}")
 
 
 def estimate_ND_status():
@@ -629,7 +769,7 @@ def estimate_ND_status():
     # Update OGM with drone data
     try:
         observe_data_drone, observe_gt_drone, observe_proj_drone = load_image(
-            "georeferenced_drone_images/", 1)
+            "georeferenced_drone_images", 1)
         ogm_data = update_occupancy_grid(ogm_data, ogm_gt_, observe_data_drone, observe_gt_drone)
     except FileNotFoundError:
         logger.warning("Drone images directory not found.")
@@ -710,9 +850,9 @@ def estimate_ND_status():
     # Save updated OGM as GeoTIFF
     try:
         output_tiff_path = f"occupancy_grid_map_{disaster_type}.tif"
-        metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
+        metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, crs_epsg=4326)
         logger.info(f"{ND_entity_ID}")
-
+        logger.info(f"Metadata {metadata}")
         process_and_upload_ogm(ND_entity_ID, os.path.join("estimated_OGM", output_tiff_path),
                                config.BUCKET_NAME, metadata)
     except Exception as e:
@@ -847,7 +987,7 @@ def estimate_Objects_status():
                         # Ensure the entry has a valid label
                         label = entry.get("label", -1)
                         if label == -1:
-                            logger.warning(f"Skipping entry with invalid label: {entry}")
+                            # logger.warning(f"Skipping entry with invalid label: {entry}")
                             continue
 
                         # Extract the position data
@@ -904,14 +1044,14 @@ def estimate_Objects_status():
                 # Validate each entry
                 geo_coords = entry.get("geo_coords", [])
                 if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
-                    logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
+                    # logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
                     continue
 
                 score = entry.get("score", 0.0)
                 label = entry.get("label", -1)
 
                 if label == -1:
-                    logger.info(f"Skipping entry with label -1: {entry}")
+                    # logger.info(f"Skipping entry with label -1: {entry}")
                     continue
 
                 # Construct the GeoJSON feature
@@ -999,7 +1139,7 @@ def estimate_Objects_status():
 
             # Save the GeoTIFF to the output path
             logger.info(f"Saving GeoTIFF to {output_tiff_path}")
-            metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
+            metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, crs_epsg=4326)
 
             # Upload the GeoTIFF to the cloud bucket
             logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
@@ -1069,7 +1209,7 @@ def estimate_Objects_status():
 
                                 # Check if the observation is within the FOV of the OGM
                                 if not is_within_fov_ogm(ogm_gt_, lon, lat):
-                                    logger.info(f"Coordinates ({lon}, {lat}) are outside the FOV. Skipping.")
+                                    # logger.info(f"Coordinates ({lon}, {lat}) are outside the FOV. Skipping.")
                                     continue
 
                                 # Construct the observation (x, y, z)
@@ -1156,14 +1296,14 @@ def estimate_Objects_status():
                     # Validate each entry
                     geo_coords = entry.get("geo_coords", [])
                     if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
-                        logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
+                        # logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
                         continue
 
                     score = entry.get("score", 0.0)
                     label = entry.get("label", -1)
 
                     if label == -1:
-                        logger.info(f"Skipping entry with label -1: {entry}")
+                        # logger.info(f"Skipping entry with label -1: {entry}")
                         continue
 
                     # Construct the GeoJSON feature
@@ -1251,7 +1391,7 @@ def estimate_Objects_status():
 
                 # Save the GeoTIFF to the output path
                 logger.info(f"Saving GeoTIFF to {output_tiff_path}")
-                metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, ogm_proj)
+                metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, crs_epsg=4326)
 
                 # Upload the GeoTIFF to the cloud bucket
                 logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
@@ -1416,104 +1556,58 @@ def generate_metadata(occupancy_grid_data, transform):
 
 def get_roi(new_polygon_coords, existing_map_path, resolution, crs_epsg=4326):
     """
-    Create a GeoTIFF based on new polygon coordinates with a specified resolution.
-    Check for an existing map, and if none exists, create a new one.
+    Create a GeoTIFF based on polygon coordinates with a specified resolution.
 
     Args:
-        new_polygon_coords (list): A list of coordinates defining a polygon.
-        existing_map_path (str): Path to the existing GeoTIFF map.
-        resolution (int, optional): Resolution in meters per pixel. Defaults to 10.
-        crs_epsg (int, optional): EPSG code for the CRS. Defaults to 4326 (WGS84).
+        new_polygon_coords (list): Polygon coordinates.
+        existing_map_path (str): Path for saving the GeoTIFF.
+        resolution (float): Resolution (in meters or degrees per pixel).
+        crs_epsg (int): EPSG code for CRS.
 
     Returns:
-        data_set: GDAL dataset of the created or loaded map, or None if an error occurs.
+        data_set: GDAL dataset, or None if an error occurs.
     """
     try:
-        # Validate resolution
         if resolution <= 0:
-            raise ValueError("Resolution must be a positive, non-zero value.")
+            raise ValueError("Resolution must be a positive value.")
 
-        # Validate input coordinates
-        if not new_polygon_coords or not isinstance(new_polygon_coords, list):
-            raise ValueError("Invalid new_polygon_coords: Must be a non-empty list of [x, y] coordinates.")
-        if len(new_polygon_coords) < 3:
-            raise ValueError("Invalid new_polygon_coords: At least three coordinates are required to form a polygon.")
+        polygon = Polygon(new_polygon_coords)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+            if not polygon.is_valid:
+                raise ValueError("Polygon is invalid.")
 
-        # Ensure coordinates form a valid polygon
-        new_polygon = Polygon(new_polygon_coords)
-        if not new_polygon.is_valid:
-            new_polygon = new_polygon.buffer(0)  # Attempt to repair the polygon
-            if not new_polygon.is_valid:
-                raise ValueError("Invalid polygon: Ensure the coordinates form a valid polygon.")
+        minx, miny, maxx, maxy = polygon.bounds
 
-        # Reproject the polygon to a metric CRS (e.g., EPSG:3857) for proper dimensions in meters
-        metric_crs_epsg = 3857  # Using Web Mercator as an example
-        transformer = Transformer.from_crs(f"EPSG:{crs_epsg}", f"EPSG:{metric_crs_epsg}", always_xy=True)
-        reprojected_polygon = transform(lambda x, y: transformer.transform(x, y), new_polygon)
+        logger.debug(f"Polygon bounds: minx={minx}, maxx={maxx}, miny={miny}, maxy={maxy}")
 
-        # Compute bounding box for the reprojected polygon
-        minx, miny, maxx, maxy = reprojected_polygon.bounds
-        if maxx == minx or maxy == miny:
-            raise ValueError("Invalid polygon bounds: Polygon must have a non-zero spatial extent.")
+        if crs_epsg == 4326:
+            width = max(1, int((maxx - minx) / (resolution / 111320)))  # Convert meters to degrees
+            height = max(1, int((maxy - miny) / (resolution / 111320)))
+        else:
+            width = max(1, int((maxx - minx) / resolution))
+            height = max(1, int((maxy - miny) / resolution))
 
-        logger.debug(f"Reprojected bounds: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
-
-        # Compute dimensions in pixels based on resolution (meters per pixel)
-        width = max(1, int((maxx - minx) / resolution))
-        height = max(1, int((maxy - miny) / resolution))
-        logger.info(f"Creating new GeoTIFF with width={width}, height={height}, resolution={resolution}m.")
-
-        # Check if the existing GeoTIFF exists
-        if os.path.exists(existing_map_path):
-            logger.info(f"Existing map found at {existing_map_path}.")
-            data_set = gdal.Open(existing_map_path, gdal.GA_ReadOnly)
-            if data_set is None:
-                logger.error(f"GDAL failed to open {existing_map_path}.")
-                return None
-            return data_set
-
-        # Create an empty occupancy grid
-        occupancy_grid_data = np.zeros((height, width), dtype=np.uint8)
-
-        # Define the affine transform for the GeoTIFF
         transform_ = from_bounds(minx, miny, maxx, maxy, width, height)
 
-        # Save the new GeoTIFF
-        try:
-            with rasterio.open(
-                    existing_map_path,
-                    'w',
-                    driver='GTiff',
-                    height=occupancy_grid_data.shape[0],
-                    width=occupancy_grid_data.shape[1],
-                    count=1,
-                    dtype=occupancy_grid_data.dtype,
-                    crs=CRS.from_epsg(metric_crs_epsg),
-                    transform=transform_,
-            ) as dst:
-                dst.write(occupancy_grid_data, 1)
-            logger.info(f"GeoTIFF successfully created at {existing_map_path}.")
-        except Exception as e:
-            logger.error(f"Error creating GeoTIFF: {e}")
-            return None
+        occupancy_grid_data = np.zeros((height, width), dtype=np.uint8)
+        with rasterio.open(
+                existing_map_path,
+                'w',
+                driver='GTiff',
+                height=height,
+                width=width,
+                count=1,
+                dtype=occupancy_grid_data.dtype,
+                crs=CRS.from_epsg(crs_epsg),
+                transform=transform_,
+        ) as dst:
+            dst.write(occupancy_grid_data, 1)
+        return gdal.Open(existing_map_path, gdal.GA_ReadOnly)
 
-        # Confirm the file was created and return the dataset
-        if not os.path.exists(existing_map_path):
-            logger.error(f"Failed to create GeoTIFF: {existing_map_path} not found after writing.")
-            return None
-
-        data_set = gdal.Open(existing_map_path, gdal.GA_ReadOnly)
-        if data_set is None:
-            logger.error(f"GDAL failed to open the newly created GeoTIFF at {existing_map_path}.")
-            return None
-
-        return data_set
-
-    except ValueError as ve:
-        logger.error(f"Validation error in get_roi: {ve}")
     except Exception as e:
-        logger.exception(f"Unexpected error in get_roi: {e}")
-    return None
+        logger.error(f"Error in get_roi: {e}")
+        return None
 
 
 def convert_to_polygon(return_bounding_box=True):
@@ -1698,26 +1792,10 @@ def create_entity(entity_ID, entity_type_):
                 "type": "Property",
                 "value":
                     {
-                        "XMin":
-                            {
-                                "type": "Property",
-                                "value": 0.0
-                            },
-                        "XRes":
-                            {
-                                "type": "Property",
-                                "value": 0.0
-                            },
-                        "YMax":
-                            {
-                                "type": "Property",
-                                "value": 0.0
-                            },
-                        "YRes":
-                            {
-                                "type": "Property",
-                                "value": 0.0
-                            }
+                        "XMin": {"type": "Property", "value": 0.0},
+                        "XRes": {"type": "Property", "value": 0.0},
+                        "YMax": {"type": "Property", "value": 0.0},
+                        "YRes": {"type": "Property", "value": 0.0}
                     }
             },
         "spatialReference": {
@@ -1728,38 +1806,22 @@ def create_entity(entity_ID, entity_type_):
             "type": "Polygon",
             "coordinates": [
                 [
-                    [
-                        -0.165825,
-                        51.495065
-                    ],
-                    [
-                        -0.165825,
-                        51.513123
-                    ],
-                    [
-                        -0.111065,
-                        51.513123
-                    ],
-                    [
-                        -0.111065,
-                        51.495065
-                    ],
-                    [
-                        -0.165825,
-                        51.495065
-                    ]
+                    [-0.165825, 51.495065],
+                    [-0.165825, 51.513123],
+                    [-0.111065, 51.513123],
+                    [-0.111065, 51.495065],
+                    [-0.165825, 51.495065]
                 ]
             ]
         },
-        "minio_url": {
-            "type": "Property",
-            "value": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/occupancy_grid_map{natural_disaster}'
-        },
+        # "minio_url": {
+        #     "type": "Property",
+        #     "value": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/occupancy_grid_map{natural_disaster}.tif'
+        # },
         "filename": {
             "type": "Property",
-            "value": f"occupancy_grid_map_{global_cache.get('natural_disaster', 'No disaster info')}.tif"
+            "value": f"occupancy_grid_map_{natural_disaster}.tif"
         },
-
         "bucket": {
             "type": "Property",
             "value": "naples"
@@ -1769,17 +1831,22 @@ def create_entity(entity_ID, entity_type_):
         ]
     }
 
-    response_ = requests.post(url, json=data, headers=headers)
+    try:
+        response_ = requests.post(url, json=data, headers=headers)
+        response_.raise_for_status()  # Raise exception for HTTP errors
 
-    if response_.status_code == 201:
-        logger.info(f"Entity {entity_ID} created successfully.")
-        return response_
-    elif response_.status_code == 409:
-        logger.info(f"Entity {entity_ID} already exists.")
-        return {"status": "Entity already exists"}, 409
-    else:
-        logger.warning(f"Failed to create entity: {response_.status_code} - {response_.text}")
-        return {"status": "Error"}, 500
+        if response_.status_code == 201:
+            logger.info(f"Entity {entity_ID} created successfully.")
+            return response_
+        elif response_.status_code == 409:
+            logger.info(f"Entity {entity_ID} already exists.")
+            return {"status": "Entity already exists"}, 409
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error creating entity {entity_ID}: {e}")
+        return {"status": "Connection Error"}, 500
+
+    logger.warning(f"Failed to create entity: {response_.status_code} - {response_.text}")
+    return {"status": "Error", "message": response_.text}, response_.status_code
 
 
 ########################################################################################################################
@@ -1792,39 +1859,21 @@ def update_entity(entity_id_, payload):
     data_to_send = {
         "description": payload["description"],
         "creationDate": payload["creationDate"],
-        "geotransform":
-            {
-                "type": "Property",
-                "value":
-                    {
-                        "XMin":
-                            {
-                                "type": "Property",
-                                "value": payload["XMin"]
-                            },
-                        "XRes":
-                            {
-                                "type": "Property",
-                                "value": payload["XRes"]
-                            },
-                        "YMax":
-                            {
-                                "type": "Property",
-                                "value": payload["YMax"]
-                            },
-                        "YRes":
-                            {
-                                "type": "Property",
-                                "value": payload["YRes"]
-                            }
-                    }
-            },
-        "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/{payload["file_name"]}',
+        "geotransform": {
+            "type": "Property",
+            "value": {
+                "XMin": {"type": "Property", "value": payload["XMin"]},
+                "XRes": {"type": "Property", "value": payload["XRes"]},
+                "YMax": {"type": "Property", "value": payload["YMax"]},
+                "YRes": {"type": "Property", "value": payload["YRes"]}
+            }
+        },
+        # "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/{payload["file_name"]}',
         "filename": payload["file_name"],
         "bucket": payload["bucket"],
         "location": {
             "type": "Polygon",
-            "coordinates": global_cache.get('roi', 'No disaster info')
+            "coordinates": payload["coordinates"]
         }
     }
     # Ensure @context is included in the payload
@@ -1832,6 +1881,11 @@ def update_entity(entity_id_, payload):
         "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
         **data_to_send
     }
+
+    # Validate coordinates
+    if not isinstance(payload["coordinates"], list) or len(payload["coordinates"]) == 0:
+        logger.error(f"Invalid coordinates in payload for entity {entity_id_}")
+        return None
 
     try:
         response = requests.post(url_, json=payload_with_context, headers=headers)
@@ -2295,10 +2349,6 @@ def load_image(image_path, mode):
     Load the image and return its pixel values, geo-transform, and CRS.
     Supports multiple modes for different input types.
     """
-    try:
-        main(global_cache.get('natural_disaster', 'No disaster info'))
-    except Exception as e:
-        logger.error(f"Issue in geo-referencing due to {e}")
 
     """
     Load the image and return its pixel values, geo-transform, and CRS
@@ -2318,13 +2368,34 @@ def load_image(image_path, mode):
         spatial_ref = dataset__.GetProjection()
 
     if mode == 0:  # Load previous OGM
+        # Open the GeoTIFF file
         dataset_ = gdal.Open(image_path, gdal.GA_ReadOnly)
         if dataset_ is None:
+            logger.info(f"Could not open file {image_path}")
             raise FileNotFoundError(f"Could not open file {image_path}")
+
+        # Retrieve the first band
         band_ = dataset_.GetRasterBand(1)
+        if band_ is None:
+            logger.info(f"Could not access the first band of {image_path}")
+            raise ValueError(f"Could not access the first band of {image_path}")
+
+        # Read data as an array
         data = band_.ReadAsArray()
+        if data is None:
+            logger.info(f"Failed to read data from the first band of {image_path}")
+            raise ValueError(f"Failed to read data from the first band of {image_path}")
+
+        # Get GeoTransform
         geo_transform = dataset_.GetGeoTransform()
+        if geo_transform is None:
+            logger.info(f"GeoTransform not found for file {image_path}")
+            logger.warning(f"GeoTransform not found for file {image_path}")
+
+        # Get spatial reference
         spatial_ref = dataset_.GetProjection()
+        if not spatial_ref:
+            logger.warning(f"Spatial reference system not defined for file {image_path}")
 
     elif mode == 1:  # Load the Observation of geo-referenced segmented drone image TFA-06
         for observation in sorted(os.listdir(image_path), reverse=False):
@@ -2565,45 +2636,129 @@ def get_geotiff_metadata_rasterio(geotiff_path):
     return None
 
 
-def save_geotiff(output_path_maps_, FileName, data, GTransform, projection):
+# def save_geotiff(output_path_maps_, FileName, data, GTransform, projection):
+#     """
+#         Save data as a GeoTIFF file
+#     """
+#     data = np.array(data)
+#     driver = gdal.GetDriverByName('GTiff')
+#     if not driver:
+#         logging.error('GTiff driver is not available.')
+#         return
+#     height, width = data.shape
+#
+#     dataset_ogm = driver.Create(os.path.join(output_path_maps_, FileName), width, height, 1, gdal.GDT_Float32)
+#     dataset_ogm.SetGeoTransform(GTransform)
+#     dataset_ogm.SetProjection(projection)
+#
+#     # Define the CRS using EPSG code (EPSG:4326 for WGS 84)
+#     srs = osr.SpatialReference()
+#     srs.ImportFromEPSG(4326)
+#     dataset_ogm.SetProjection(srs.ExportToWkt())
+#     band_ = dataset_ogm.GetRasterBand(1)
+#     band_.WriteArray(data)
+#     band_.SetDescription('Estimated OGM')  # Band description
+#
+#     metadata = {
+#         'title': 'OGM',
+#         'author': 'GRVC lab, University of Seville',
+#         'description': f"Estimated OGM for {global_cache.get('natural_disaster', 'No disaster info')}.",
+#         'creationDate': datetime.now().isoformat(),  # Current date and time
+#         "XMin": GTransform[0],
+#         "XRes": GTransform[1],
+#         "YMax": GTransform[3],
+#         "YRes": GTransform[5],
+#         "spatialReference": 'EPSG:4326 for WGS 84',
+#         "file_name": FileName,
+#         "bucket": config.BUCKET_NAME
+#     }
+#     dataset_ogm.SetMetadata(metadata)
+#     dataset_ogm.FlushCache()  # Write to disk
+#     return metadata
+def save_geotiff(output_path_maps_, FileName, data, GTransform, crs_epsg=4326):
     """
-        Save data as a GeoTIFF file
+    Save data as a GeoTIFF file.
+
+    Args:
+        output_path_maps_ (str): Directory to save the GeoTIFF file.
+        FileName (str): Name of the GeoTIFF file.
+        data (ndarray): 2D array of the data to save.
+        GTransform (list): GeoTransform values [XMin, XRes, 0, YMax, 0, YRes].
+        crs_epsg (int): EPSG code for the CRS.
+
+    Returns:
+        dict: Metadata of the saved GeoTIFF.
     """
-    data = np.array(data)
-    driver = gdal.GetDriverByName('GTiff')
-    if not driver:
-        logging.error('GTiff driver is not available.')
-        return
-    height, width = data.shape
+    try:
+        # Ensure data is a numpy array
+        data = np.array(data)
+        driver = gdal.GetDriverByName('GTiff')
+        if not driver:
+            logging.error('GTiff driver is not available.')
+            return None
 
-    dataset_ogm = driver.Create(os.path.join(output_path_maps_, FileName), width, height, 1, gdal.GDT_Float32)
-    dataset_ogm.SetGeoTransform(GTransform)
-    dataset_ogm.SetProjection(projection)
+        # Validate GeoTransform
+        if len(GTransform) != 6:
+            raise ValueError("GTransform must contain exactly six elements.")
 
-    # Define the CRS using EPSG code (EPSG:4326 for WGS 84)
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(4326)
-    dataset_ogm.SetProjection(srs.ExportToWkt())
-    band_ = dataset_ogm.GetRasterBand(1)
-    band_.WriteArray(data)
-    band_.SetDescription('Estimated OGM')  # Band description
+        logging.debug(f"Input GTransform: {GTransform}")
+        logging.debug(f"Input CRS EPSG: {crs_epsg}")
 
-    metadata = {
-        'title': 'OGM',
-        'author': 'GRVC lab, University of Seville',
-        'description': f"Estimated OGM for {global_cache.get('natural_disaster', 'No disaster info')}.",
-        'creationDate': datetime.now().isoformat(),  # Current date and time
-        "XMin": GTransform[0],
-        "XRes": GTransform[1],
-        "YMax": GTransform[3],
-        "YRes": GTransform[5],
-        "spatialReference": 'EPSG:4326 for WGS 84',
-        "file_name": FileName,
-        "bucket": config.BUCKET_NAME
-    }
-    dataset_ogm.SetMetadata(metadata)
-    dataset_ogm.FlushCache()  # Write to disk
-    return metadata
+        # Create the dataset
+        height, width = data.shape
+        output_file_path = os.path.join(output_path_maps_, FileName)
+        dataset_ogm = driver.Create(output_file_path, width, height, 1, gdal.GDT_Float32)
+        if not dataset_ogm:
+            logging.error("Failed to create GeoTIFF dataset.")
+            return None
+
+        dataset_ogm.SetGeoTransform(GTransform)
+
+        # Set CRS
+        srs = osr.SpatialReference()
+        if crs_epsg:
+            srs.ImportFromEPSG(crs_epsg)
+            dataset_ogm.SetProjection(srs.ExportToWkt())
+        else:
+            raise ValueError("CRS EPSG code is not defined.")
+
+        logging.debug(f"CRS set to: EPSG:{crs_epsg}")
+
+        # Write data to the raster band
+        band_ = dataset_ogm.GetRasterBand(1)
+        band_.WriteArray(data)
+        band_.SetDescription('Estimated OGM')
+
+        # Define metadata
+        metadata = {
+            'title': 'OGM',
+            'author': 'GRVC lab, University of Seville',
+            'description': f"Estimated OGM for Fire.",
+            'creationDate': datetime.now().isoformat(),  # Current date and time
+            "XMin": GTransform[0],
+            "XRes": GTransform[1],
+            "YMax": GTransform[3],
+            "YRes": GTransform[5],
+            "spatialReference": f"EPSG:{crs_epsg}",
+            "file_name": FileName,
+            "coordinates": global_cache.get('roi', 'No disaster info'),
+            "bucket": "naples",
+
+        }
+        dataset_ogm.SetMetadata(metadata)
+
+        logging.debug(f"GeoTIFF metadata: {metadata}")
+
+        # Flush cache and close dataset
+        dataset_ogm.FlushCache()
+        dataset_ogm = None
+
+        logging.info(f"GeoTIFF saved successfully at {output_file_path}")
+        return metadata
+
+    except Exception as e:
+        logging.error(f"Error saving GeoTIFF: {e}")
+        return None
 
 
 def pixel_to_coordinates(geo_transform, row, col):
@@ -2874,6 +3029,8 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
     print(f"file path {file_path_}")
     try:
         minio_client.upload_file(bucket_name, object_name, file_path_)
+        minio_client.download_file(bucket_name, object_name,
+                                   f"/home/abdalraheem/Documents/GitHub/Information_Fusion_PDM_tech_05/{object_name}")
         logger.info(f"File '{file_path_}' uploaded to bucket '{bucket_name}' successfully.")
         print(f"File '{file_path_}' uploaded to bucket '{bucket_name}' successfully.")
     except Exception as e:

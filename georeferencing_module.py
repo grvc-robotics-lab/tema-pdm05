@@ -19,10 +19,10 @@ def main(natural_disaster):
     global path
     disaster = natural_disaster
     if natural_disaster == 'Flood':
-        path = 'downloads/drone_imgs/Flood/'
+        path = './downloads/drone_imgs/Flood/'
     elif natural_disaster == 'Fire':
-        path = 'downloads/drone_imgs/Fire/'
-    output_path = 'georeferenced_drone_images/'
+        path = './downloads/drone_imgs/Fire/'
+    output_path = './georeferenced_drone_images/'
     DEM_path = f'{path}subset_dem.tif'
 
     # Parameter selection
@@ -103,11 +103,16 @@ def main(natural_disaster):
 
     file_name = 'none'
     for file in sorted(os.listdir(path), reverse=False):
-        if file.endswith('.JPG'):
+        if file.endswith('.JPG') or file.endswith('.png'):
             file_name = os.path.splitext(file)[0]
-            break
+            run_goe(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
+                    max_elevation,
+                    min_elevation, dem_bounds,
+                    dem_res_geo, dem_res_meter, downsampling, downsampling_factors, coordinate_system,
+                    terrain_model, parallel_processing)
+            # break
     if file_name == 'none':
-        logger.info('Error: No .JPG files found in the specified directory.')
+        logger.info('Error: No .JPG nor .png files found in the specified directory.')
         return
 
     run_goe(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation,
@@ -122,7 +127,7 @@ def run_goe(output_path, path, disaster, file_name,
             downsampling, downsampling_factors, coordinate_systeme, terrain_model, parallel_processing):
     # Inputs
     image_path = path + file_name
-    segmented_image = f'{image_path}.JPG'
+    segmented_image = f'{image_path}.png'
     segmented_metadata_file = f'{image_path}_metadata.json'
 
     # Retrieve the camera state from image metadata
@@ -538,3 +543,5 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
     dataset.SetGeoTransform(geotransform)
 
     return image, geotransform, srs.ExportToWkt()
+
+

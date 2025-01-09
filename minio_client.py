@@ -28,7 +28,6 @@ class MinIOClient:
             # Remove leading slash from object_name
             if object_name.startswith("/"):
                 object_name = object_name[1:]
-
             logger.info(f"Object Name in for uploading {object_name}")
             logger.info(f"File path in for uploading {file_path}")
             # Upload the file

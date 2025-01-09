@@ -20,9 +20,7 @@ def delete_maps4fire_subscriptions():
         # Filter subscriptions for Maps4Fire entity type with the specific callback URL
         maps4fire_subscriptions = [
             sub for sub in subscriptions
-            if "entities" in sub and any(
-                e.get("id") == BROKER_ENTITY_Maps4Fire_ID or e.get("type") == "Alert" for e in sub["entities"]
-            ) and sub["notification"]["endpoint"]["uri"] == CALLBACK_URL
+            if sub["notification"]["endpoint"]["uri"] == CALLBACK_URL
         ]
 
         if not maps4fire_subscriptions:
@@ -55,5 +53,5 @@ def delete_entity(entity_id):
 
 
 # Run the function
-delete_maps4fire_subscriptions()
-delete_entity("urn:ngsi-ld:USE:SV-01:DroneImages:01")
+# delete_maps4fire_subscriptions()
+# delete_entity("urn:ngsi-ld:USE:SV-01:DroneImages:01")
