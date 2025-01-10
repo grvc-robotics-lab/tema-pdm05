@@ -38,4 +38,4 @@ def delete_entity(broker_url_, entity_id):
         print(f'Failed to delete entity. Status code: {response.status_code}, Response: {response.text}')
 
 
-delete_entity(config.BROKER_URL, config.ENTITY_Maps4Fire_ID)
+delete_entity(config.BROKER_URL, "urn:ngsi-ld:Alert:100")

@@ -103,22 +103,27 @@ def main(natural_disaster):
 
     file_name = 'none'
     for file in sorted(os.listdir(path), reverse=False):
-        if file.endswith('.JPG') or file.endswith('.png'):
+        if file.endswith('.png'):
             file_name = os.path.splitext(file)[0]
-            run_goe(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
-                    max_elevation,
-                    min_elevation, dem_bounds,
-                    dem_res_geo, dem_res_meter, downsampling, downsampling_factors, coordinate_system,
-                    terrain_model, parallel_processing)
-            # break
-    if file_name == 'none':
-        logger.info('Error: No .JPG nor .png files found in the specified directory.')
-        return
+            if file_name == 'none':
+                logger.info('Error: No .JPG nor .png files found in the specified directory.')
+                return
+            else:
+                run_goe(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
+                        max_elevation,
+                        min_elevation, dem_bounds,
+                        dem_res_geo, dem_res_meter, downsampling, downsampling_factors, coordinate_system,
+                        terrain_model, parallel_processing)
 
-    run_goe(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation,
-            min_elevation, dem_bounds,
-            dem_res_geo, dem_res_meter, downsampling, downsampling_factors, coordinate_system,
-            terrain_model, parallel_processing)
+    #         break
+    # if file_name == 'none':
+    #     logger.info('Error: No .JPG nor .png files found in the specified directory.')
+    #     return
+    #
+    # run_goe(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation,
+    #         min_elevation, dem_bounds,
+    #         dem_res_geo, dem_res_meter, downsampling, downsampling_factors, coordinate_system,
+    #         terrain_model, parallel_processing)
 
 
 def run_goe(output_path, path, disaster, file_name,
@@ -532,6 +537,7 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
         bl_lon, bl_lat = Transformer.from_crs("EPSG:4326", "EPSG:3857").transform(
             orig_dic[str(img_height - 1) + ',0'][1],
             orig_dic[str(img_height - 1) + ',0'][0])
+
     delta_x = sqrt((tl_lon - tr_lon) ** 2 + (tl_lat - tr_lat) ** 2)
     delta_y = sqrt((tl_lon - bl_lon) ** 2 + (tl_lat - bl_lat) ** 2)
     x_res = delta_x / img_width
