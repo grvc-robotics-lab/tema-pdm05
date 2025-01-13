@@ -23,7 +23,7 @@ from logging_config import logger
 from pyproj import CRS, Transformer
 from rasterio.windows import Window
 from datetime import datetime
-from shapely.geometry import Polygon, box
+from shapely.geometry import Polygon, box, mapping
 from shapely.ops import transform
 from concurrent.futures import ThreadPoolExecutor
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -65,6 +65,8 @@ processing_lock = Lock()
 
 ogm_flag = False
 ogm_counter = 0
+
+
 ###################################################################
 @app.route(f'/{config.BASE_PATH}')
 def index():
@@ -257,7 +259,7 @@ def handle_person_vehicle_detection(notification, parameters):
 
     metadata_file_base = auth_filename.split('.')[0]
     detection_file = f"{metadata_file_base}_obj.json"
-    metadata_file = f"{metadata_file_base}_metadata.json"
+    metadata_file = f"{metadata_file_base}_objects_metadata.json"
 
     # Getting disaster info from the global cache
     disaster_info = global_cache.get('natural_disaster', 'No disaster info')
@@ -284,8 +286,8 @@ def handle_person_vehicle_detection(notification, parameters):
         # Call main function for geo-referencing
         try:
             disaster_info = global_cache.get('natural_disaster', 'No disaster info')
-            main(disaster_info)
-            logger.info("Geo-referencing is done correctly.")
+            main(disaster_info, "bbox")
+            logger.info("Geo-referencing is done correctly for person and vehicles.")
         except Exception as e:
             logger.error(f"Issue in geo-referencing due to {e}")
 
@@ -322,8 +324,8 @@ def handle_segmentation(notification):
             # Call main function for geo-referencing
             try:
                 disaster_info = global_cache.get('natural_disaster', 'No disaster info')
-                main(disaster_info)
-                logger.info("Geo-referencing is done correctly.")
+                main(disaster_info, "segmented")
+                logger.info("Geo-referencing is done correctly for segmented images.")
             except Exception as e:
                 logger.error(f"Issue in geo-referencing due to {e}")
 
@@ -394,19 +396,21 @@ def handle_file_download(notification):
             isinstance(bucket, dict) and 'value' in bucket):
         logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
         return
-
-    try:
-        downloaded_file_path = download_file(entity_type, filename_, bucket)
-        if downloaded_file_path:
-            logger.info(f"File downloaded successfully to {downloaded_file_path}")
-            print(f"File downloaded successfully to {downloaded_file_path}")
-        else:
-            logger.error("File download failed.")
-    except Exception as e:
-        logger.error(f"Error in downloading file: {e}", exc_info=True)
+    downloaded_file_path = None
+    if (isinstance(filename_, dict) and 'value' in filename_ and filename_['value'] and
+            isinstance(bucket, dict) and 'value' in bucket and bucket['value']):
+        try:
+            downloaded_file_path = download_file(entity_type, filename_, bucket)
+            if downloaded_file_path:
+                logger.info(f"File downloaded successfully to {downloaded_file_path}")
+                print(f"File downloaded successfully to {downloaded_file_path}")
+            else:
+                logger.error("File download failed.")
+        except Exception as e:
+            logger.error(f"Error in downloading file: {e}", exc_info=True)
     ##########################################################################################################
     # Handle cases with data.href for EOBurntArea or similar
-    if data_href:
+    elif data_href:
         logger.info(f"Handling download via data.href for entity type: {entity_type}")
         try:
             downloaded_file_path = download_file_from_url(entity_type, data_href)
@@ -420,7 +424,7 @@ def handle_file_download(notification):
         return
     ##########################################################################################################
     # Handle cases with minio_url
-    if minio_url:
+    elif minio_url:
         logger.info(f"Handling download via URL for entity type: {entity_type}")
         try:
             downloaded_file_path = download_file_from_url(entity_type, minio_url)
@@ -433,6 +437,11 @@ def handle_file_download(notification):
             logger.error(f"Error downloading file via URL: {e}", exc_info=True)
         return
     ##########################################################################################################
+    if not downloaded_file_path:
+        logger.warning(
+            "No valid download source found in notification. Ensure filename, bucket, data.href, or minio_url are "
+            "correctly provided.")
+        return
 
 
 def download_file_from_url(entity_type, url):
@@ -697,7 +706,8 @@ def estimate_ND_status():
     # polygon_coordinates = convert_to_polygon()
     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
     ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
-    roi_data = global_cache.get('roi', None)
+    roi_data = global_cache.get('roi')
+    logger.info(f"ROI data -> {roi_data}")
     ogm_data, ogm_gt_, ogm_proj = load_image(ogm_path, 0)
 
     # Update OGM with drone data
@@ -729,8 +739,9 @@ def estimate_ND_status():
     # Update OGM with satellite data
     try:
         observ_sat_data_, observ_sat_gt_, observ_sat_proj = extract_roi_from_satellite_files(
-            "downloads/satellite_imgs/", roi_data)
+            "downloads/satellite_imgs", roi_data)
         ogm_data = update_occupancy_grid(ogm_data, ogm_gt_, observ_sat_data_, observ_sat_gt_)
+        logger.info(f"OGM has successfully generated and fused sate file")
     except FileNotFoundError:
         logger.warning("Satellite ROI directory not found.")
     except Exception as e:
@@ -911,6 +922,7 @@ def estimate_Objects_status():
             # Retrieve observation metadata
             observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images")
             print("Observation Metadata Type:", type(observ_metadata))
+            logger.info("Observation Metadata Type:", type(observ_metadata))
             print("First Entry of Observation Metadata:", observ_metadata[0] if observ_metadata else "No Data")
 
             if not observ_metadata:
@@ -3099,21 +3111,24 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
     """
     # Validate ROI coordinates
     if not isinstance(roi_coords, list) or not roi_coords or not isinstance(roi_coords[0], list):
+        logger.error("ROI coordinates must be a nested list of [lon, lat] pairs.")
         raise ValueError("ROI coordinates must be a nested list of [lon, lat] pairs.")
 
     try:
         roi_polygon = Polygon(roi_coords[0])  # Create Polygon from the outer ring
     except Exception as e:
+        logger.error(f"Invalid ROI coordinates: {e}")
         raise ValueError(f"Invalid ROI coordinates: {e}")
 
     # Validate image path
     if not os.path.isdir(image_path):
+        logger.warning(f"Image path does not exist or is not a directory: {image_path}")
         raise FileNotFoundError(f"Image path does not exist or is not a directory: {image_path}")
 
     # Initialize results lists
-    observ_sat_data_ = []
-    observ_sat_gt_ = []
-    observ_sat_proj = []
+    observ_sat_data_ = None
+    observ_sat_gt_ = None
+    observ_sat_proj = None
 
     # Search for satellite files
     satellite_files = [f for f in os.listdir(image_path) if f.endswith((".jp2", ".gpkg"))]
@@ -3122,50 +3137,83 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
         return observ_sat_data_, observ_sat_gt_, observ_sat_proj
 
     for sat_file in satellite_files:
+        logger.info(f"Processing satellite file {sat_file}")
         sat_file_path = os.path.join(image_path, sat_file)
         try:
             if sat_file.endswith(".jp2"):
                 with rasterio.open(sat_file_path) as src:
                     image_crs = src.crs
+
+                    # Assign CRS if missing
                     if image_crs is None:
-                        raise ValueError(f"CRS is missing in file: {sat_file}")
+                        print("Manually assigning CRS: EPSG:32632")
+                        image_crs = CRS.from_epsg(32632)
 
-                    # Reproject ROI if necessary
-                    if str(image_crs) != "EPSG:4326":
-                        transformer = Transformer.from_crs("EPSG:4326", str(image_crs), always_xy=True)
-                        roi_polygon_projected = transform_(transformer.transform, roi_polygon)
-                    else:
-                        roi_polygon_projected = roi_polygon
+                    print(f"Raster bounds (UTM): {src.bounds}")
+                    print(f"Raster CRS: {image_crs}")
 
-                    # Check intersection
-                    if not src.bounds.intersects(roi_polygon_projected.bounds):
-                        print(f"ROI does not intersect raster bounds for {sat_file}. Skipping.")
+                    transformer = Transformer.from_crs("EPSG:4326", str(image_crs), always_xy=True)
+                    roi_polygon_projected = Polygon([
+                        transformer.transform(*coord) for coord in roi_polygon.exterior.coords
+                    ])
+
+                    print(f"Original ROI (EPSG:4326): {roi_polygon.bounds}")
+                    print(f"Reprojected ROI (EPSG:32632): {roi_polygon_projected.bounds}")
+
+                    raster_bounds_polygon = box(*src.bounds)
+                    if not raster_bounds_polygon.intersects(roi_polygon_projected):
+                        print("ROI does not intersect raster bounds. Skipping.")
                         continue
 
-                    # Crop raster to ROI
-                    out_image, out_transform = mask(src, [roi_polygon_projected], crop=True)
+                    try:
+                        geojson_roi = [mapping(roi_polygon_projected)]
+                        out_image, out_transform = mask(src, geojson_roi, crop=True)
 
-                    # Upscale raster to 1 meter per pixel resolution
-                    target_resolution = 1  # 1 meter per pixel
-                    transform_, width, height = calculate_default_transform(
-                        src.crs, src.crs, out_image.shape[2], out_image.shape[1],
-                        *src.bounds, resolution=target_resolution)
+                        print(f"Masked image shape: {out_image.shape}")
+                        print(f"Masked image unique values: {np.unique(out_image)}")
 
-                    upscaled_image = np.empty((src.count, height, width), dtype=src.dtypes[0])
-                    reproject(
-                        source=out_image,
-                        destination=upscaled_image,
-                        src_transform=out_transform,
-                        src_crs=src.crs,
-                        dst_transform=transform_,
-                        dst_crs=src.crs,
-                        resampling=Resampling.bilinear,
-                    )
+                        if src.nodata is not None:
+                            print(f"Raster NoData value: {src.nodata}")
+                            out_image[out_image == src.nodata] = np.nan
 
-                    # Append results
-                    observ_sat_data_.append(upscaled_image)
-                    observ_sat_gt_.append(transform_)
-                    observ_sat_proj.append(src.crs.to_string())
+                        non_nan_pixels = np.count_nonzero(~np.isnan(out_image))
+                        print(f"Non-NaN pixels in masked image: {non_nan_pixels}")
+
+                        if non_nan_pixels == 0:
+                            print("Cropped area contains only NoData values. Skipping.")
+                            continue
+
+                        # Target CRS
+                        dst_crs = CRS.from_epsg(4326)
+                        dst_transform, dst_width, dst_height = calculate_default_transform(
+                            image_crs, dst_crs, out_image.shape[2], out_image.shape[1], *src.bounds
+                        )
+                        reprojected_image = np.empty((out_image.shape[0], dst_height, dst_width), dtype=out_image.dtype)
+
+                        try:
+                            # Explicitly pass the manually assigned CRS (image_crs) to src_crs
+                            reproject(
+                                source=out_image,
+                                destination=reprojected_image,
+                                src_transform=out_transform,
+                                src_crs=image_crs,  # Use the manually assigned CRS
+                                dst_transform=dst_transform,
+                                dst_crs=dst_crs,
+                                resampling=Resampling.bilinear,
+                            )
+                        except Exception as e:
+                            print(f"Reprojection failed: {e}")
+                            continue
+
+                        # Append results
+                        observ_sat_data_ = reprojected_image
+                        observ_sat_gt_ = dst_transform
+                        observ_sat_proj = dst_crs.to_string()
+                        print("Results appended successfully!")
+
+                    except Exception as e:
+                        logger.error(f"Error while processing {sat_file}: {e}", exc_info=True)
+                        continue
 
             elif sat_file.endswith(".gpkg"):
                 gdf = gpd.read_file(sat_file_path)
@@ -3184,23 +3232,23 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
                 clipped_gdf = gpd.overlay(gdf, roi_gdf, how="intersection")
 
                 if not clipped_gdf.empty:
-                    observ_sat_data_.append(clipped_gdf)
-                    observ_sat_gt_.append(None)  # No GeoTransform for vector data
-                    observ_sat_proj.append(gdf.crs.to_string())
+                    observ_sat_data_ = clipped_gdf
+                    observ_sat_gt_ = None  # No GeoTransform for vector data
+                    observ_sat_proj = gdf.crs.to_string()
                 else:
                     print(f"No intersection found for ROI in {sat_file}")
 
+                # Attempt to delete processed file
+                try:
+                    os.remove(sat_file_path)
+                    print(f"Deleted processed file: {sat_file}")
+                except Exception as e:
+                    print(f"Error deleting file {sat_file}: {e}")
+
+                return observ_sat_data_, observ_sat_gt_, observ_sat_proj
+
         except Exception as e:
             print(f"Error processing {sat_file}: {e}")
-
-        # Attempt to delete processed file
-        try:
-            os.remove(sat_file_path)
-            print(f"Deleted processed file: {sat_file}")
-        except Exception as e:
-            print(f"Error deleting file {sat_file}: {e}")
-
-    return observ_sat_data_, observ_sat_gt_, observ_sat_proj
 
 
 #####################################################################

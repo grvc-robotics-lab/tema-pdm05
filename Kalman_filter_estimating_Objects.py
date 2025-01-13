@@ -30,10 +30,10 @@ class KalmanFilter:
             self.H = H
 
         # Process noise covariance
-        self.Q = Q if Q is not None else np.eye(state_dim) * 1e-5
+        self.Q = Q if Q is not None else np.eye(state_dim) * 1e-3
 
         # Measurement noise covariance
-        self.R = R if R is not None else np.eye(measurement_dim) * 1e-5
+        self.R = R if R is not None else np.eye(measurement_dim) * 1e-3
 
         # Estimate uncertainty covariance
         self.P = P if P is not None else np.eye(state_dim)
