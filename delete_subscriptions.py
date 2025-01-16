@@ -51,24 +51,27 @@ def delete_subscriptions(subscription_ids):
             print(f"Details: {result['details']}")
 
 
-if __name__ == "__main__":
-    # IDs to be deleted
-    subscriptions_to_delete = [
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:003",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:004",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:005",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:006",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:007",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:008",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:009",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:010",
-        "urn:ngsi-ld:tema:subscription:USE:PDM05:011",
-        ################################################
-        # "urn:ngsi-ld:tema:USE:TFA-06:HotspotResult",
-        # "urn:ngsi-ld:tema:USE:TFA-06:FireSmokeSegmentation",
-        # "urn:ngsi-ld:tema:USE:TFA-06:HotspotResult",
-    ]
+# IDs to be deleted
+subscriptions_to_delete = [
+    ################################################
+    # PDM05
+    ################################################
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:003",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:004",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:005",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:006",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:007",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:008",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:009",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:010",
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:011",
+    ###############################################
+    # SV01
+    ################################################
+    # "urn:ngsi-ld:tema:subscription:USE:SV01:001",
+    # "urn:ngsi-ld:tema:subscription:USE:SV01:002"
+]
 
-    # Delete Subscriptions
-    delete_subscriptions(subscriptions_to_delete)
+# Delete Subscriptions
+delete_subscriptions(subscriptions_to_delete)
