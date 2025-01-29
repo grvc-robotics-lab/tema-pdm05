@@ -24,7 +24,7 @@ from logging_config import logger
 from pyproj import CRS, Transformer
 from rasterio.windows import Window
 from datetime import datetime
-from shapely.geometry import Polygon, box, mapping
+from shapely.geometry import Polygon, box, mapping, shape
 from shapely.ops import transform
 from concurrent.futures import ThreadPoolExecutor
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -59,7 +59,9 @@ polygon_coordinates = None
 global_cache = {"processing": False,
                 "natural_disaster": "No disaster info",
                 "roi": "No disaster info",
-                "expiration": "No info"}
+                "expiration": "No info",
+                "ignitionPoints": "No info",
+                }
 global_cache_lock = threading.Lock()
 
 alert_event = threading.Event()  # Event triggered by Alert notifications
@@ -283,6 +285,7 @@ def handle_segmentation(notification):
 
 
 def process_alert(notification, entity_id):
+    #############################################################
     location = notification.get("location", {}).get("value", {})
     if isinstance(location, dict) and "coordinates" in location:
         try:
@@ -296,7 +299,7 @@ def process_alert(notification, entity_id):
     else:
         global_cache['roi'] = "No disaster info"
         logger.warning(f"Unexpected 'location' format for entity ID {entity_id}: {location}")
-
+    #############################################################
     event_ = notification.get("event", {}).get("value", None)
     if event_:
         try:
@@ -319,7 +322,20 @@ def process_alert(notification, entity_id):
         except Exception as e:
             logger.error(f"Error accessing 'expires' value for entity ID {entity_id}: {e}")
             global_cache['expiration'] = "No info"
+    #############################################################
+    ignitionPoints = notification.get("ignitionPoints", {}).get("value", {})
+    if isinstance(ignitionPoints, dict) and "coordinates" in ignitionPoints:
+        try:
+            global_cache['ignitionPoints'] = ignitionPoints['coordinates']
+            logger.info(f"ignitionPoints set for entity ID {entity_id}: {global_cache['ignitionPoints']}")
+            print(f"ignitionPoints set for entity ID {entity_id}: {global_cache['ignitionPoints']}")
 
+        except Exception as e:
+            logger.error(f"Error accessing 'ignitionPoints' for entity ID {entity_id}: {e}")
+            global_cache['ignitionPoints'] = "No info"
+    else:
+        global_cache['ignitionPoints'] = "No info"
+        logger.warning(f"Unexpected 'ignitionPoints' format for entity ID {entity_id}: {ignitionPoints}")
     #############################################################
 
 
@@ -674,8 +690,22 @@ def initialize_processing():
                     ogm_path_ND = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
                     print(f"polygon_coordinates --> {polygon_coordinates}")
                     get_roi(polygon_coordinates, ogm_path_ND, resolution=10)
+                    ##############################################################
+                    result = mask_geotiff_with_polygon_exact(ogm_path_ND, global_cache.get('roi'), ogm_path_ND)
+                    if result:
+                        print(f"Masked GeoTIFF saved to {result}")
+                    else:
+                        print("Error occurred while masking the GeoTIFF.")
+                    ##############################################################
                     ogm_path_obj = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
                     get_roi(polygon_coordinates, ogm_path_obj, resolution=10)
+                    ##############################################################
+                    result = mask_geotiff_with_polygon_exact(ogm_path_obj, global_cache.get('roi'), ogm_path_obj)
+                    if result:
+                        print(f"Masked GeoTIFF saved to {result}")
+                    else:
+                        print("Error occurred while masking the GeoTIFF.")
+                    ##############################################################
                     ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
                     logger.info(f"OGM counter --> {ogm_counter}")
                     ogm_counter += 1
@@ -719,6 +749,7 @@ def subscribe_to_entities():
 
     entity_types_with_ids = {
         "Alert": "urn:ngsi-ld:tema:subscription:USE:PDM05:011",
+        # "Alert": "urn:ngsi-ld:Subscription:1a68a5ec-d718-11ef-8fd9-0a580a821b57",
         "FloodCalculationResults": "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
         "StandardArrivalTime": "urn:ngsi-ld:tema:subscription:USE:PDM05:003",
         "FireSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:004",
@@ -1637,6 +1668,61 @@ def get_roi(new_polygon_coords, existing_map_path, resolution, crs_epsg=4326):
 
     except Exception as e:
         logger.error(f"Error in get_roi: {e}")
+        return None
+
+
+def mask_geotiff_with_polygon_exact(geotiff_path, polygon_coords, output_path):
+    """
+    Mask a GeoTIFF file with a given polygon. Anything outside the polygon is set to zero.
+    The polygon's exact shape is preserved.
+
+    Args:
+        geotiff_path (str): Path to the input GeoTIFF.
+        polygon_coords (list): List of polygon coordinates (e.g., [[(x1, y1), (x2, y2), ...]]).
+        output_path (str): Path to save the masked GeoTIFF.
+
+    Returns:
+        str: Path to the masked GeoTIFF, or None if an error occurs.
+    """
+    try:
+        # Open the GeoTIFF
+        with rasterio.open(geotiff_path) as src:
+            # Convert polygon coordinates to GeoJSON-like format
+            polygon_geojson = {
+                "type": "Polygon",
+                "coordinates": polygon_coords
+            }
+
+            # Mask the data using the polygon
+            masked_data, masked_transform = mask(
+                src,
+                [shape(polygon_geojson)],
+                crop=False,  # Do not crop; retain original raster extent
+                filled=True,
+                invert=False  # Mask everything outside the polygon
+            )
+
+            # Replace masked areas with zero
+            masked_data = np.where(masked_data == src.nodata, 0, masked_data)
+
+            # Update metadata for the output file
+            out_meta = src.meta.copy()
+            out_meta.update({
+                "driver": "GTiff",
+                "height": masked_data.shape[1],
+                "width": masked_data.shape[2],
+                "transform": masked_transform,
+                "nodata": 0  # Set nodata value explicitly
+            })
+
+            # Write the masked data to the new GeoTIFF
+            with rasterio.open(output_path, "w", **out_meta) as dst:
+                dst.write(masked_data)
+
+        return output_path
+
+    except Exception as e:
+        print(f"Error masking GeoTIFF: {e}")
         return None
 
 
