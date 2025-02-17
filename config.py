@@ -50,6 +50,10 @@ BROKER_TYPE_ID = os.getenv("BROKER_TYPE_ID", "GeoTIFF")
 ENTITY_Maps4Flood_ID = os.getenv("BROKER_ENTITY_Maps4Flood_ID")
 ENTITY_Maps4Fire_ID = os.getenv("BROKER_ENTITY_Maps4Fire_ID")
 ENTITY_Maps4Object_ID = os.getenv("BROKER_ENTITY_Maps4Object_ID")
+OpenTopography_api_key = os.getenv("OpenTopography_api_key")
+
+if not OpenTopography_api_key:
+    logger.error("No OpenTopography_api_key")
 
 logger.debug("All configurations loaded successfully.")
 
