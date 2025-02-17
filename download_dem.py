@@ -1,132 +1,178 @@
 import geopandas as gpd
-import rasterio
-from rasterio.mask import mask
-from shapely.geometry import Polygon
 import requests
+from shapely.geometry import Polygon
 import os
-import math
-import rasterio
-from rasterio.merge import merge
-import glob
 
 
-def merge_tiles(tile_files, output_file):
+def download_opentopography_dem(api_key, output_file, coordinates, dem_dataset="SRTMGL1"):
     """
-    Merge multiple raster tiles into a single file.
-    tile_files: List of raster file paths.
-    output_file: Path to save the merged output.
+    Download a DEM GeoTIFF for the given polygon coordinates from OpenTopography.
+
+    Parameters:
+        api_key (str): OpenTopography API key.
+        output_file (str): Path to save the DEM file.
+        coordinates (list): List of (longitude, latitude) tuples defining the polygon.
+        dem_dataset (str): Dataset to use (e.g., "SRTMGL1" for 30m DEM, "SRTMGL3" for 90m DEM).
     """
-    rasters = [rasterio.open(f) for f in tile_files]
-    mosaic, out_trans = merge(rasters)
+    # Create a bounding box from the coordinates
+    polygon = Polygon(coordinates)
+    minx, miny, maxx, maxy = polygon.bounds
 
-    # Update metadata for the mosaic
-    out_meta = rasters[0].meta.copy()
-    out_meta.update({
-        "driver": "GTiff",
-        "height": mosaic.shape[1],
-        "width": mosaic.shape[2],
-        "transform": out_trans
-    })
+    # OpenTopography API endpoint
+    api_url = f"https://portal.opentopography.org/API/globaldem?demtype={dem_dataset}&south={miny}&north={maxy}&west={minx}&east={maxx}&outputFormat=GTiff"
 
-    # Save the mosaic to the output file
-    with rasterio.open(output_file, "w", **out_meta) as dest:
-        dest.write(mosaic)
+    # Request parameters
+    params = {
+        "API_Key": api_key
+    }
 
-    # Close raster files
-    for raster in rasters:
-        raster.close()
+    # Submit the request to OpenTopography
+    try:
+        print(f"Submitting request to OpenTopography for DEM ({dem_dataset})...")
+        response = requests.get(api_url, params=params, stream=True)
+        response.raise_for_status()
 
-    print(f"Merged DEM saved to {output_file}")
+        # Save the DEM file
+        with open(output_file, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
 
-
-def deg2num(lat_deg, lon_deg, zoom):
-    """Convert latitude/longitude to tile numbers."""
-    lat_rad = math.radians(lat_deg)
-    n = 2.0 ** zoom
-    x = int((lon_deg + 180.0) / 360.0 * n)
-    y = int((1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
-    return x, y
+        print(f"DEM downloaded and saved to {output_file}")
+    except requests.RequestException as e:
+        print(f"Failed to download DEM: {e}")
 
 
-def num2deg(x, y, zoom):
-    """Convert tile numbers to latitude/longitude."""
-    n = 2.0 ** zoom
-    lon_deg = x / n * 360.0 - 180.0
-    lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
-    lat_deg = math.degrees(lat_rad)
-    return lat_deg, lon_deg
+# Example Usage
+# Define your OpenTopography API key
+opentopo_api_key = "56da0f69ae202d4d9414278b0f6537bd"  # Replace with your OpenTopography API key
+polygon_coords =[
+      [
+        [
+          8.646228,
+          40.145055
+        ],
+        [
+          8.625344,
+          40.144059
+        ],
+        [
+          8.620159,
+          40.135551
+        ],
+        [
+          8.624378,
+          40.129896
+        ],
+        [
+          8.636082,
+          40.127167
+        ],
+        [
+          8.651879,
+          40.129928
+        ],
+        [
+          8.650204,
+          40.139981
+        ],
+        [
+          8.646228,
+          40.145055
+        ]
+      ]
+    ][0]
 
 
-def get_tiles_from_bounds(bounds, zoom):
-    """
-    Get tile indices (x, y, z) for a bounding box at a given zoom level.
-    Bounds: (min_lon, min_lat, max_lon, max_lat)
-    """
-    min_lon, min_lat, max_lon, max_lat = bounds
-    x_min, y_min = deg2num(max_lat, min_lon, zoom)
-    x_max, y_max = deg2num(min_lat, max_lon, zoom)
+# Output file path
 
-    tiles = []
-    for x in range(x_min, x_max + 1):
-        for y in range(y_min, y_max + 1):
-            tiles.append({'x': x, 'y': y, 'z': zoom})
-    return tiles
+output_dem_file = "subset_dem.tif"
+
+# Download the DEM
+download_opentopography_dem(
+    api_key=opentopo_api_key,
+    output_file=output_dem_file,
+    coordinates=polygon_coords,
+    dem_dataset="SRTMGL1"  # Choose "SRTMGL1" (30m resolution) or "SRTMGL3" (90m resolution)
+)
 
 
-# Define the polygon coordinates
-polygon_coords = [
-    (-120.1, 35.1),
-    (-120.1, 35.3),
-    (-119.9, 35.3),
-    (-119.9, 35.1),
-    (-120.1, 35.1),
-]
-polygon = Polygon(polygon_coords)
+#################################################################################
+# import rasterio
+# import json
+# from geojson import Feature, FeatureCollection, dump
+#
+# # Specify the GeoTIFF file
+# geotiff_file = "your_file.tif"
+#
+# # Read metadata from the GeoTIFF
+# with rasterio.open(geotiff_file) as dataset:
+#     # Extract metadata
+#     metadata = dataset.meta
+#
+#     # Extract bounds as a GeoJSON geometry
+#     bounds = dataset.bounds
+#     bbox_geometry = {
+#         "type": "Polygon",
+#         "coordinates": [[
+#             [bounds.left, bounds.bottom],
+#             [bounds.left, bounds.top],
+#             [bounds.right, bounds.top],
+#             [bounds.right, bounds.bottom],
+#             [bounds.left, bounds.bottom]
+#         ]]
+#     }
+#
+#     # Create a GeoJSON feature
+#     feature = Feature(
+#         geometry=bbox_geometry,
+#         properties={key: metadata[key] for key in metadata if key != 'transform'}
+#     )
+#
+# # Create a FeatureCollection
+# feature_collection = FeatureCollection([feature])
+#
+# # Save the FeatureCollection to a GeoJSON file
+# output_file = "output_metadata.geojson"
+# with open(output_file, 'w') as f:
+#     dump(feature_collection, f)
+#
+# print(f"Metadata has been saved to {output_file}")
 
-# Create a GeoDataFrame
-gdf = gpd.GeoDataFrame(index=[0], crs="EPSG:4326", geometry=[polygon])
-
-# URL for AWS Terrain Tiles (you can replace this with another DEM source)
-DEM_SOURCE = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
-
-
-# Download DEM data using the polygon bounds
-def download_dem(bounds, zoom=12, output_file="dem.tif"):
-    # Generate tile indices (this example uses a generic URL template for simplicity)
-    tiles = get_tiles_from_bounds(bounds, zoom)
-    dem_files = []
-
-    for tile in tiles:
-        url = DEM_SOURCE.format(z=tile['z'], x=tile['x'], y=tile['y'])
-        response = requests.get(url)
-        if response.status_code == 200:
-            tile_path = f"tile_{tile['x']}_{tile['y']}.png"
-            with open(tile_path, "wb") as f:
-                f.write(response.content)
-            dem_files.append(tile_path)
-
-    # Merge tiles into one DEM file
-    if dem_files:
-        merge_tiles(dem_files, output_file)
-        for file in dem_files:
-            os.remove(file)
-        print(f"DEM saved to {output_file}")
-
-
-# A helper function to get tile indices and merge raster tiles can be added.
-
-# Use rasterio to mask and crop the DEM
-def clip_dem(input_dem, output_dem, polygon):
-    with rasterio.open(input_dem) as src:
-        out_image, out_transform = mask(src, [polygon], crop=True)
-        out_meta = src.meta.copy()
-        out_meta.update({"driver": "GTiff", "height": out_image.shape[1],
-                         "width": out_image.shape[2], "transform": out_transform})
-        with rasterio.open(output_dem, "w", **out_meta) as dest:
-            dest.write(out_image)
-
-
-# Example usage
-bounds = gdf.geometry.total_bounds
-download_dem(bounds)
-clip_dem("dem.tif", "clipped_dem.tif", polygon)
+# from datetime import datetime, timezone
+# import time
+#
+# # Example global_cache dictionary
+# global_cache = {
+#     "expiration": "2025-01-15T13:11:37.899Z"  # Initial expiration value
+# }
+#
+#
+# def monitor_expiration():
+#     while True:
+#         # Get the expiration from global_cache
+#         expiration = global_cache.get('expiration')
+#
+#         if expiration:
+#             # Parse the expiration timestamp into a datetime object
+#             try:
+#                 expiration_time = datetime.strptime(expiration, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+#                 current_time = datetime.now(timezone.utc)
+#                 print(current_time)
+#
+#                 # Check if the current time has reached or surpassed the expiration time
+#                 if current_time >= expiration_time:
+#                     print(f"Expiration time reached: {expiration}. Exiting the loop.")
+#                     break
+#             except ValueError as e:
+#                 print(f"Invalid expiration format: {expiration}. Error: {e}")
+#                 break  # Exit the loop if expiration is malformed
+#         else:
+#             print("No valid expiration found in global_cache. Exiting the loop.")
+#             break
+#
+#         # Sleep for a short interval to avoid busy waiting
+#         time.sleep(1)
+#
+#
+# # Call the function to monitor expiration
+# monitor_expiration()
