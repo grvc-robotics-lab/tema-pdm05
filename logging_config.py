@@ -5,7 +5,7 @@ import logging
 logging.basicConfig(
     filename='app_routes.log',
     filemode='w',
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
