@@ -1,5 +1,5 @@
 export HOST=0.0.0.0
-export PORT=5505
+export PORT=5100
 export DEBUG=True
 export BROKER_URL=https://orion.tema.digital-enabler.eng.it
 export BROKER_ENTITY_Maps4Flood_ID=urn:ngsi-ld:USE:PDM-05:Maps4Flood:01
@@ -7,7 +7,7 @@ export BROKER_ENTITY_Maps4Fire_ID=urn:ngsi-ld:USE:PDM-05:Maps4Fire:01
 export BROKER_ENTITY_Maps4Object_ID=urn:ngsi-ld:USE:PDM-05:Maps4Object:01
 export BROKER_TYPE_ID=GeoTIFF
 export BROKER_SUBSCRIPTION_ID=subscription123
-export CALLBACK_NGROK=https://6977-193-147-161-71.ngrok-free.app
+export CALLBACK_NGROK=https://e680-193-147-160-155.ngrok-free.app
 export MINIO_ENDPOINT=storage.tema.digital-enabler.eng.it:443
 export MINIO_ACCESS_KEY=D4xMAQylbJML0ppbLMtt
 export MINIO_SECRET_KEY=rTV2pwa2PMApAzgV3tssGf7NKNVobM3MalAaSXpY

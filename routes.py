@@ -33,9 +33,8 @@ from threading import Thread, Lock
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-print(config.CALLBACK_URL)
 logger.info(config.CALLBACK_URL)
-
+print(config.CALLBACK_URL)
 # Initialize Flask app and SocketIO
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -58,7 +57,7 @@ polygon_coordinates = None
 
 global_cache = {"processing": False,
                 "natural_disaster": "No disaster info",
-                "roi": "No disaster info",
+                "roi": [],
                 "expiration": "No info",
                 "ignitionPoints": "No info",
                 }
@@ -140,8 +139,6 @@ def notify():
         for notification in notification_data["data"]:
             try:
                 logger.info(f"Processing notification: {notification['type']}")
-                print(f"Processing notification: {notification['type']}")
-
                 # process_notification(notification) # without concurrent processing
                 futures.append(executor.submit(process_notification, notification))
             except Exception as e:
@@ -171,13 +168,10 @@ def notify():
                 else:
                     logger.info("initialize_processing() is already running, skipping.")
                     print("initialize_processing() is already running, skipping.")
-
             else:
                 logger.info("No relevant natural disaster data, skipping processing.")
                 print("No relevant natural disaster data, skipping processing.")
-
         return jsonify({"status": "Notifications processed successfully"}), 200
-
     except Exception as e:
         logger.error(f"Unexpected error in notify function: {e}")
         return jsonify({"error": "Internal server error"}), 500
@@ -191,6 +185,11 @@ def handle_person_vehicle_detection(notification, parameters):
 
     if not auth_filename:
         logger.warning("No filename found for PersonVehicleDetection.")
+        return
+
+    # Ensure filename contains a dot (.)
+    if "." not in auth_filename:
+        logger.error("Invalid filename format received: %s", auth_filename)
         return
 
     metadata_file_base = auth_filename.split('.')[0]
@@ -295,9 +294,9 @@ def process_alert(notification, entity_id):
 
         except Exception as e:
             logger.error(f"Error accessing 'coordinates' for entity ID {entity_id}: {e}")
-            global_cache['roi'] = "No disaster info"
+            global_cache['roi'] = [None]
     else:
-        global_cache['roi'] = "No disaster info"
+        global_cache['roi'] = [None]
         logger.warning(f"Unexpected 'location' format for entity ID {entity_id}: {location}")
     #############################################################
     event_ = notification.get("event", {}).get("value", None)
@@ -567,6 +566,41 @@ def download_file(entity_type, filename_, bucket):
         logger.error(f"Error downloading file {filename_['value']} from bucket {bucket['value']}: {e}")
         return None
 
+###################################################################################################################
+# Downloading EOFloodExtent
+###################################################################################################################
+def download_tif_file(entity):
+    """
+    Downloads a .tif file from the entity's data URL if the notification corresponds to "EOFloodExtent".
+    """
+    file_url = entity.get("data", {}).get("href")
+
+    if file_url:
+        file_name = file_url.split("/")[-1]  # Extract filename from URL
+
+        logger.info(f"Downloading {file_name} from {file_url}...")
+        print(f"Downloading {file_name} from {file_url}...")
+
+        try:
+            response = requests.get(file_url, stream=True)
+            response.raise_for_status()  # Raise an error for bad responses
+
+            with open(file_name, "wb") as file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    file.write(chunk)
+
+            logger.info(f"Download completed: {file_name}")
+            print(f"Download completed: {file_name}")
+            return file_name  # Return the filename for further processing if needed
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to download file: {e}")
+            print(f"Failed to download file: {e}")
+            return None
+    else:
+        logger.error("No valid download URL found in entity.")
+        print("No valid download URL found in entity.")
+###################################################################################################################
 
 def process_notification(notification):
     entity_id = notification.get("id")
@@ -585,9 +619,9 @@ def process_notification(notification):
             try:
                 logger.info("Triggering Alert entity processing")
                 print("Triggering Alert entity processing")
-
                 process_alert(notification, entity_id)
                 alert_event.set()
+
             except Exception as e:
                 logger.error(f"Error processing Alert entity ID {entity_id}: {e}")
 
@@ -604,6 +638,15 @@ def process_notification(notification):
                 handle_segmentation(notification)
             except Exception as e:
                 logger.error(f"Error handling segmentation for entity ID {entity_id}: {e}")
+        #######################################################################################################
+        elif entity_type == "EOFloodExtent":
+            try:
+                logger.info("Processing EOFloodExtent entity: Downloading .tif file")
+                print("Processing EOFloodExtent entity: Downloading .tif file")
+                download_tif_file(notification)  # Call the function to download the GeoTIFF
+            except Exception as e:
+                logger.error(f"Error handling EOFloodExtent for entity ID {entity_id}: {e}")
+        #######################################################################################################
         else:
             try:
                 handle_file_download(notification)
@@ -623,9 +666,48 @@ def process_notification(notification):
         logger.error(f"Error processing notification {entity_id} of type {entity_type}: {e}")
 
 
+########################################################################################################################
+def download_opentopography_dem(api_key, output_file, coordinates, dem_dataset="SRTMGL1"):
+    """
+    Download a DEM GeoTIFF for the given polygon coordinates from OpenTopography.
+
+    Parameters:
+        api_key (str): OpenTopography API key.
+        output_file (str): Path to save the DEM file.
+        coordinates (list): List of (longitude, latitude) tuples defining the polygon.
+        dem_dataset (str): Dataset to use (e.g., "SRTMGL1" for 30m DEM, "SRTMGL3" for 90m DEM).
+    """
+    # Create a bounding box from the coordinates
+    polygon = Polygon(coordinates)
+    minx, miny, maxx, maxy = polygon.bounds
+
+    # OpenTopography API endpoint
+    api_url = f"https://portal.opentopography.org/API/globaldem?demtype={dem_dataset}&south={miny}&north={maxy}&west={minx}&east={maxx}&outputFormat=GTiff"
+
+    # Request parameters
+    params = {
+        "API_Key": api_key
+    }
+
+    # Submit the request to OpenTopography
+    try:
+        print(f"Submitting request to OpenTopography for DEM ({dem_dataset})...")
+        response = requests.get(api_url, params=params, stream=True)
+        response.raise_for_status()
+
+        # Save the DEM file
+        with open(output_file, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        print(f"DEM downloaded and saved to {output_file}")
+    except requests.RequestException as e:
+        print(f"Failed to download DEM: {e}")
+########################################################################################################################
+
+
 def initialize_processing():
     global entities_initialized, ogm_flag, polygon_coordinates, ogm_counter, polygon_coordinates
-    # polygon_coordinates = convert_to_polygon()
     while True:
         ################################################################################################################
         expiration = global_cache.get('expiration')
@@ -660,8 +742,9 @@ def initialize_processing():
                         if os.path.isfile(file_path):
                             os.remove(file_path)
                             logger.info(f"Deleted file: {file_path}")
-                ###########################################################
                 disaster_type = global_cache.get('natural_disaster', 'No disaster info')
+                ###########################################################
+                # Delete existing files in the drone images
                 drone_imgs_fire = f"downloads/drone_imgs/{disaster_type}"
                 if os.path.isdir(drone_imgs_fire):
                     for file in os.listdir(drone_imgs_fire):
@@ -673,6 +756,7 @@ def initialize_processing():
                                 os.remove(file_path)
                                 logger.info(f"Deleted file: {file_path}")
                 ###########################################################
+                # Delete existing files in the geo-referenced drone images
                 georeferenced_imgs = "georeferenced_drone_images"
                 if os.path.isdir(georeferenced_imgs):
                     for file in os.listdir(georeferenced_imgs):
@@ -691,6 +775,15 @@ def initialize_processing():
                     print(f"polygon_coordinates --> {polygon_coordinates}")
                     get_roi(polygon_coordinates, ogm_path_ND, resolution=10)
                     ##############################################################
+                    output_dem_file = f"downloads/drone_imgs/{global_cache.get('natural_disaster')}/subset_dem.tif"
+                    # Download the DEM
+                    download_opentopography_dem(
+                        api_key=config.OpenTopography_api_key,
+                        output_file=output_dem_file,
+                        coordinates=polygon_coordinates,
+                        dem_dataset="SRTMGL1"  # Choose "SRTMGL1" (30m resolution) or "SRTMGL3" (90m resolution)
+                    )
+                    ###########################################################
                     result = mask_geotiff_with_polygon_exact(ogm_path_ND, global_cache.get('roi'), ogm_path_ND)
                     if result:
                         print(f"Masked GeoTIFF saved to {result}")
@@ -748,8 +841,7 @@ def subscribe_to_entities():
     }
 
     entity_types_with_ids = {
-        "Alert": "urn:ngsi-ld:tema:subscription:USE:PDM05:011",
-        # "Alert": "urn:ngsi-ld:Subscription:1a68a5ec-d718-11ef-8fd9-0a580a821b57",
+        "Alert": "urn:ngsi-ld:tema:subscription:USE:PDM05:001",
         "FloodCalculationResults": "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
         "StandardArrivalTime": "urn:ngsi-ld:tema:subscription:USE:PDM05:003",
         "FireSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:004",
@@ -758,7 +850,8 @@ def subscribe_to_entities():
         "PersonVehicleDetection": "urn:ngsi-ld:tema:subscription:USE:PDM05:007",
         "HotspotResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:008",
         "SinglePostResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:009",
-        "EOBurntArea": "urn:ngsi-ld:tema:subscription:USE:PDM05:010"
+        "EOBurntArea": "urn:ngsi-ld:tema:subscription:USE:PDM05:010",
+        "EOFloodExtent": "urn:ngsi-ld:tema:subscription:USE:PDM05:011",
     }
 
     try:
@@ -2539,7 +2632,7 @@ def load_image(image_path, mode):
                 break
 
     elif mode == 3:  # Load the Observation of ROI satellite images TFA-08/09
-        roi_polygon = Polygon(global_cache.get('roi', 'No disaster info')[0])
+        roi_polygon = Polygon(global_cache.get('roi', [None])[0])
         for observation in sorted(os.listdir(image_path), reverse=False):
             if observation.endswith(".jp2"):
                 observation_path = os.path.join(image_path, observation)
@@ -2862,7 +2955,7 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, crs_epsg=4326):
             "YRes": GTransform[5],
             "spatialReference": f"EPSG:{crs_epsg}",
             "file_name": FileName,
-            "coordinates": global_cache.get('roi', 'No disaster info'),
+            "coordinates": global_cache.get('roi', [None]),
             "bucket": "naples",
             "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/occupancy_grid_map{natural_disaster}.tif'
 

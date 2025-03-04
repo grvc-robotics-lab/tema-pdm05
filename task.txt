@@ -1,0 +1,13 @@
+TEMA:
+	Information Fusion PDM05:
+		Update the Information fusion:
+			maps for Segmentation (Burnt images)
+			maps for Segmentation (Fire images)
+		MinIO rules:
+			Uploading 
+			Downloading
+		Digital Elevation Model (DEM)
+
+	Drone data acquisition SV0:
+		Update the IR + RGB images
+		Deploy the docker image on the cloud edge consortium

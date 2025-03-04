@@ -42,7 +42,7 @@ logger.info(f"Constructed CALLBACK_URL: {CALLBACK_URL}")
 # Application settings
 HOST = os.getenv('HOST', '0.0.0.0')  # Default to all interfaces
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'  # Convert to boolean
-PORT = os.getenv('PORT', '5505')  # Default to port 80 if not set
+PORT = os.getenv('PORT', '5100')  # Default to port 80 if not set
 
 # Other configurations
 OBJECT_NAME = os.getenv('OBJECT_NAME', 'default_object.tif')

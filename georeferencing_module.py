@@ -222,12 +222,11 @@ def run_geo(output_path, path, disaster, file_name,
                 scores = []
                 labels = []
                 if len(bounding_data)>0:
-                    for _ in range(len(bounding_data['value'])):
-                        bounding_boxes.append([int(i) for i in bounding_data['value'][_]['bbox']])
-                        scores.append(bounding_data['value'][_]['confidence'])
-                        labels.append(bounding_data['value'][_]['category_id'])
+                    for _ in range(len(bounding_data['boxes'])):
+                        bounding_boxes.append(bounding_data['boxes'][_]['bbox'])
+                        scores.append(bounding_data['boxes'][_]['confidence'])
+                        labels.append(bounding_data['boxes'][_]['category_id'])
 
-                    #bounding_boxes = [[int(i) for i in bounding_box] for bounding_box in bounding_boxes]
                     if downsampling:
                         down_bounding_box = []
                         for bounding_box in bounding_boxes:
@@ -238,7 +237,7 @@ def run_geo(output_path, path, disaster, file_name,
                             down_bounding_box.append(down_bbx)
                         bounding_boxes = down_bounding_box
             image_emp = np.zeros((img_height, img_width))
-
+            image_dim = (img_height, img_width)
             # Put the values of four corners as 1 (which is != 0) to be georeferenced in the ray-tracing function
             image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[0, img_width - 1] = 1
 
