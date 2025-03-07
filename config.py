@@ -42,7 +42,7 @@ logger.info(f"Constructed CALLBACK_URL: {CALLBACK_URL}")
 # Application settings
 HOST = os.getenv('HOST', '0.0.0.0')  # Default to all interfaces
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'  # Convert to boolean
-PORT = os.getenv('PORT', '5100')  # Default to port 80 if not set
+PORT = os.getenv('PORT')  # Default to port 80 if not set
 
 # Other configurations
 OBJECT_NAME = os.getenv('OBJECT_NAME', 'default_object.tif')
@@ -50,7 +50,7 @@ BROKER_TYPE_ID = os.getenv("BROKER_TYPE_ID", "GeoTIFF")
 ENTITY_Maps4Flood_ID = os.getenv("BROKER_ENTITY_Maps4Flood_ID")
 ENTITY_Maps4Fire_ID = os.getenv("BROKER_ENTITY_Maps4Fire_ID")
 ENTITY_Maps4Object_ID = os.getenv("BROKER_ENTITY_Maps4Object_ID")
-OpenTopography_api_key = os.getenv("OpenTopography_api_key")
+OpenTopography_api_key = os.getenv("OpenTopography_api_key", '56da0f69ae202d4d9414278b0f6537bd')
 
 if not OpenTopography_api_key:
     logger.error("No OpenTopography_api_key")

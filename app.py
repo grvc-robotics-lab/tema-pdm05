@@ -1,6 +1,5 @@
 import config
-from routes import app, socketio, subscribe_to_entities, list_subscriptions, \
-    log_active_subscriptions
+from routes import app, socketio, subscribe_to_entities
 from logging_config import logger  # Import the logger from the logging config module
 
 
@@ -8,8 +7,7 @@ if __name__ == "__main__":
     logger.info("Starting the Flask application...")  # Log when the application starts
 
     subscribe_to_entities()
-    # log_active_subscriptions()
-    # list_subscriptions()
+
 
     host = config.HOST
     port = config.PORT

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CsvFileAttributes">
+    <option name="attributeMap">
+      <map>
+        <entry key="/IF_module/lib/python3.8/site-packages/fiona/gdal_data/grib2_table_4_2_local_MRMS.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/IF_module/lib/python3.8/site-packages/fiona/gdal_data/s57expectedinput.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/IF_module/lib/python3.8/site-packages/rasterio/gdal_data/grib2_table_4_2_local_MRMS.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/IF_module/lib/python3.8/site-packages/rasterio/gdal_data/s57expectedinput.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/IF_module/lib64/python3.8/site-packages/fiona/gdal_data/grib2_table_4_2_local_MRMS.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/IF_module/lib64/python3.8/site-packages/fiona/gdal_data/s57expectedinput.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/IF_module/lib64/python3.8/site-packages/rasterio/gdal_data/grib2_table_4_2_local_MRMS.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/IF_module/lib64/python3.8/site-packages/rasterio/gdal_data/s57expectedinput.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>

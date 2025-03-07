@@ -22,6 +22,7 @@ from georeferencing_module import main
 from minio_client import MinIOClient
 from logging_config import logger
 from pyproj import CRS, Transformer
+from datetime import timedelta
 from rasterio.windows import Window
 from datetime import datetime
 from shapely.geometry import Polygon, box, mapping, shape
@@ -120,6 +121,7 @@ def logs_data():
 def notify():
     try:
         notification_data = request.get_json()
+        # print(f"Processing notification: {notification_data}")
         if not isinstance(notification_data, dict):
             logger.error("Invalid notification data: Expected a JSON object.")
             return jsonify({"error": "Invalid notification data format"}), 400
@@ -139,12 +141,10 @@ def notify():
         for notification in notification_data["data"]:
             try:
                 logger.info(f"Processing notification: {notification['type']}")
-                # process_notification(notification) # without concurrent processing
                 futures.append(executor.submit(process_notification, notification))
             except Exception as e:
                 logger.error(f"Error processing notification {notification}: {e}")
 
-        # Wait for all submitted tasks to complete
         for future in futures:
             try:
                 future.result()  # Ensure exceptions in threads are raised
@@ -152,7 +152,6 @@ def notify():
                 logger.error(f"Error in processing notification: {e}")
 
         with global_cache_lock:
-            # Ensure that initialize_processing() is not already running
             if global_cache['natural_disaster'] != 'No disaster info':
                 if not global_cache['processing']:
                     global_cache['processing'] = True
@@ -164,7 +163,7 @@ def notify():
                         processing_thread.start()
                     except Exception as e:
                         logger.error(f"Error in initialize_processing: {e}")
-                        global_cache['processing'] = False  # Reset on failure
+                        global_cache['processing'] = False
                 else:
                     logger.info("initialize_processing() is already running, skipping.")
                     print("initialize_processing() is already running, skipping.")
@@ -225,7 +224,6 @@ def handle_person_vehicle_detection(notification, parameters):
             logger.info("Geo-referencing is done correctly for person and vehicles.")
         except Exception as e:
             logger.error(f"Issue in geo-referencing due to {e}")
-
     except Exception as e:
         logger.error(f"Error writing detection files: {e}")
         return
@@ -234,6 +232,7 @@ def handle_person_vehicle_detection(notification, parameters):
 def handle_segmentation(notification):
     bucket = notification.get("bucket", {}).get('value')
     auth_filename = notification.get('segmentation', {}).get('value')
+    disaster = global_cache.get('natural_disaster', 'No disaster info')
 
     if not auth_filename or not isinstance(auth_filename, dict):
         logger.warning("Invalid or missing 'segmentation' value in notification.")
@@ -245,7 +244,7 @@ def handle_segmentation(notification):
         logger.warning("No mask_id found in auth_filename.")
         return
 
-    file_path = f"downloads/drone_imgs/{global_cache.get('natural_disaster', 'No disaster info')}/{mask_id}"
+    file_path = f"downloads/drone_imgs/{disaster}/{mask_id}"
     logger.info(f"path of download {file_path}")
     print(f"path of download {file_path}")
 
@@ -255,11 +254,8 @@ def handle_segmentation(notification):
         if downloaded_file_path:
             logger.info(f"File downloaded successfully to {downloaded_file_path}")
             print(f"File downloaded successfully to {downloaded_file_path}")
-
-            # Call main function for geo-referencing
             try:
-                disaster_info = global_cache.get('natural_disaster', 'No disaster info')
-                main(disaster_info, "segmented")
+                main(disaster, "segmented")
                 logger.info("Geo-referencing is done correctly for segmented images.")
             except Exception as e:
                 logger.error(f"Issue in geo-referencing due to {e}")
@@ -273,7 +269,7 @@ def handle_segmentation(notification):
 
     metadata_file_base = mask_id.split('.')[0]
     metadata_file = f"{metadata_file_base}_metadata.json"
-    json_file_path = f"downloads/drone_imgs/{global_cache.get('natural_disaster', 'No disaster info')}/{metadata_file}"
+    json_file_path = f"downloads/drone_imgs/{disaster}/{metadata_file}"
 
     parameters = notification.get("parameters", {}).get('value', {})
     try:
@@ -350,96 +346,6 @@ def extract_bucket_and_filename(url):
     return bucket, filename
 
 
-# def handle_file_download(notification):
-#     """
-#         Handle downloading a file based on notification data.
-#         Args:
-#             notification (dict): Notification containing file and bucket information.
-#         """
-#     downloaded_file_path = None
-#     entity_type = notification.get('type')
-#     minio_url = notification.get('minio_url', {}).get('value')
-#     ##############################################################################################
-#     # Handle StandardArrivalTime
-#     if entity_type == 'StandardArrivalTime':
-#         if minio_url:
-#             logger.info(f"minio url {minio_url}")
-#             logger.info(f"Handling download via URL for entity type: {entity_type}")
-#             bucket_name, file_name = extract_bucket_and_filename(minio_url)
-#             logger.info(f"bucket_name {bucket_name} ---- filename {file_name}")
-#             try:
-#                 downloaded_file_path = download_file(entity_type, file_name, bucket_name)
-#                 if downloaded_file_path:
-#                     logger.info(f"File downloaded successfully to {downloaded_file_path}")
-#                     print(f"File downloaded successfully to {downloaded_file_path}")
-#                 else:
-#                     logger.error("File download failed.")
-#             except Exception as e:
-#                 logger.error(f"Error in downloading file: {e}", exc_info=True)
-#             # try:
-#             #     downloaded_file_path = download_file_from_url(entity_type, minio_url)
-#             #     if downloaded_file_path:
-#             #         logger.info(f"File downloaded successfully to {downloaded_file_path}")
-#             #         print(f"File downloaded successfully to {downloaded_file_path}")
-#             #     else:
-#             #         logger.error("File download via URL failed.")
-#             # except Exception as e:
-#             #     logger.error(f"Error downloading file via URL: {e}", exc_info=True)
-#             return
-#     ##############################################################################################
-#     # Handle cases with data.href for EOBurntArea or similar
-#     if entity_type == "EOBurntArea":
-#         data_href = notification.get('data', {}).get('value', {}).get('href')
-#         if data_href:
-#             logger.info(f"data_href url {data_href}")
-#             logger.info(f"Handling download via URL for entity type: {entity_type}")
-#             bucket_name, file_name = extract_bucket_and_filename(data_href)
-#             logger.info(f"bucket_name {bucket_name} ---- filename {file_name}")
-#             try:
-#                 downloaded_file_path = download_file(entity_type, file_name, bucket_name)
-#                 if downloaded_file_path:
-#                     logger.info(f"File downloaded successfully to {downloaded_file_path}")
-#                     print(f"File downloaded successfully to {downloaded_file_path}")
-#                 else:
-#                     logger.error("File download failed.")
-#             except Exception as e:
-#                 logger.error(f"Error in downloading file: {e}", exc_info=True)
-#             # try:
-#             #     downloaded_file_path = download_file_from_url(entity_type, minio_url)
-#             #     if downloaded_file_path:
-#             #         logger.info(f"File downloaded successfully to {downloaded_file_path}")
-#             #         print(f"File downloaded successfully to {downloaded_file_path}")
-#             #     else:
-#             #         logger.error("File download via URL failed.")
-#             # except Exception as e:
-#             #     logger.error(f"Error downloading file via URL: {e}", exc_info=True)
-#             return
-#     ##########################################################################################################
-#     filename_ = notification.get('filename')
-#     bucket = notification.get("bucket")
-#     # Handle cases with filename and bucket
-#     if not (isinstance(filename_, dict) and 'value' in filename_ and
-#             isinstance(bucket, dict) and 'value' in bucket):
-#         logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
-#         return
-#
-#     if (isinstance(filename_, dict) and 'value' in filename_ and filename_['value'] and
-#             isinstance(bucket, dict) and 'value' in bucket and bucket['value']):
-#         try:
-#             downloaded_file_path = download_file(entity_type, filename_, bucket)
-#             if downloaded_file_path:
-#                 logger.info(f"File downloaded successfully to {downloaded_file_path}")
-#                 print(f"File downloaded successfully to {downloaded_file_path}")
-#             else:
-#                 logger.error("File download failed.")
-#         except Exception as e:
-#             logger.error(f"Error in downloading file: {e}", exc_info=True)
-#     ##########################################################################################################
-#     if not downloaded_file_path:
-#         logger.warning(
-#             "No valid download source found in notification. Ensure filename, bucket, data.href, or minio_url are "
-#             "correctly provided.")
-#         return
 def handle_file_download(notification):
     """
     Handle downloading a file based on notification data.
@@ -465,14 +371,7 @@ def handle_file_download(notification):
         logger.info(f"Handling StandardArrivalTime download with URL: {minio_url}")
         downloaded_file_path = log_and_download(entity_type, minio_url, "StandardArrivalTime")
 
-    # Handle EOBurntArea entity type
-    elif entity_type == "EOBurntArea":
-        data_href = notification.get('data', {}).get('value', {}).get('href')
-        if data_href:
-            logger.info(f"Handling EOBurntArea download with data_href: {data_href}")
-            downloaded_file_path = log_and_download(entity_type, data_href, "EOBurntArea")
-
-    # Handle cases with filename and bucket
+    # HotspotResult SinglePostResult
     else:
         filename_ = notification.get('filename')
         bucket = notification.get("bucket")
@@ -513,7 +412,7 @@ def download_file_from_url(entity_type, url):
         "SinglePostResult": "downloads/SocialMedia",
         "UAVTrajectory": "downloads/drone_planning",
         "StandardArrivalTime": "downloads/FireSim",
-        "FloodCalculationResults": "downloads/FloodSim",
+        "FloodCalculationResult": "downloads/FloodSim",
         "EOBurntArea": "downloads/satellite_imgs"
     }
 
@@ -541,6 +440,62 @@ def download_file_from_url(entity_type, url):
         return None
 
 
+def fetch_burnt_area(notification, polygon):
+    """
+    Fetch burnt area data using the parsed URL and save it as a GeoTIFF.
+    """
+    # Parse URL from notification
+    url = notification.get('data').get('value').get('href')
+    print(f"URL ------------ {url}")
+    if not url:
+        print("No valid URL found in the notification.")
+        return
+
+    # Convert polygon to bounding box
+    minx, miny, maxx, maxy = polygon.bounds
+    bbox = f"{minx},{miny},{maxx},{maxy}"
+
+    # Fetch data from API
+    response = requests.get(url)
+    response.raise_for_status()
+    data = response.json()
+
+    # Extract geometries and convert to GeoDataFrame
+    features = data.get("features", [])
+    if not features:
+        print("No burnt area data found for the given parameters.")
+        return
+
+    gdf = gpd.GeoDataFrame.from_features(features)
+    gdf = gdf.set_crs("EPSG:4326")  # Ensure CRS is set
+
+    # Rasterize the data
+    width, height = 500, 500  # Resolution of output raster
+    transform = from_bounds(minx, miny, maxx, maxy, width, height)
+    raster_data = np.zeros((height, width), dtype=np.uint8)
+
+    for geom in gdf.geometry:
+        coords = [(int((x - minx) / (maxx - minx) * width), int((y - miny) / (maxy - miny) * height)) for x, y in
+                  geom.exterior.coords]
+        for x, y in coords:
+            if 0 <= x < width and 0 <= y < height:
+                raster_data[y, x] = 255  # Mark burnt area
+
+    output_tif = 'downloads/satellite_imgs/Fire/cropped_burnt_area.tif'
+    with rasterio.open(
+            output_tif, "w",
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=raster_data.dtype,
+            crs="EPSG:4326",
+            transform=transform
+    ) as dst:
+        dst.write(raster_data, 1)
+
+    print(f"GeoTIFF saved to {output_tif}")
+
 def download_file(entity_type, filename_, bucket):
     file_path = ""
 
@@ -552,11 +507,10 @@ def download_file(entity_type, filename_, bucket):
         file_path = f"downloads/FireSim/{filename_['value']}"
     elif entity_type == "FloodCalculationResults":
         file_path = f"downloads/FloodSim/{filename_['value']}"
-    elif entity_type == "EOBurntArea":
-        file_path = f"downloads/satellite_imgs/{filename_['value']}"
+
 
     try:
-        if entity_type == "StandardArrivalTime" or entity_type == "EOBurntArea":
+        if entity_type == "StandardArrivalTime":
             logger.info(f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
             return minio_client.download_file(bucket, filename_, file_path)
         else:
@@ -569,11 +523,12 @@ def download_file(entity_type, filename_, bucket):
 ###################################################################################################################
 # Downloading EOFloodExtent
 ###################################################################################################################
-def download_tif_file(entity):
+def download_tif_file(entity, polygon):
     """
     Downloads a .tif file from the entity's data URL if the notification corresponds to "EOFloodExtent".
     """
-    file_url = entity.get("data", {}).get("href")
+    file_url = entity.get('data').get('value').get('href')
+    print(f"file_url ********************* {file_url}")
 
     if file_url:
         file_name = file_url.split("/")[-1]  # Extract filename from URL
@@ -584,14 +539,32 @@ def download_tif_file(entity):
         try:
             response = requests.get(file_url, stream=True)
             response.raise_for_status()  # Raise an error for bad responses
-
+            file_name = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
             with open(file_name, "wb") as file:
                 for chunk in response.iter_content(chunk_size=8192):
                     file.write(chunk)
 
             logger.info(f"Download completed: {file_name}")
             print(f"Download completed: {file_name}")
-            return file_name  # Return the filename for further processing if needed
+            ################################################
+            input_tif = file_name
+            output_tif = file_name
+            polygon = Polygon(polygon[0])
+            geojson_polygon = [json.loads(gpd.GeoSeries([polygon]).to_json())['features'][0]['geometry']]
+            with rasterio.open(input_tif) as src:
+                out_image, out_transform = mask(src, geojson_polygon, crop=True)
+                out_meta = src.meta.copy()
+                out_meta.update({
+                    "driver": "GTiff",
+                    "height": out_image.shape[1],
+                    "width": out_image.shape[2],
+                    "transform": out_transform
+                })
+                with rasterio.open(output_tif, "w", **out_meta) as dest:
+                    dest.write(out_image)
+            print("Cropping complete. Saved as", output_tif)
+            ################################################
+            return file_name
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to download file: {e}")
@@ -601,6 +574,28 @@ def download_tif_file(entity):
         logger.error("No valid download URL found in entity.")
         print("No valid download URL found in entity.")
 ###################################################################################################################
+def download_hotspots_geojson(notification_data):
+    print(f"notification_hotspot_data --------------- {notification_data}")
+    bucket_name = notification_data.get("bucket")
+    object_name = notification_data.get("file_name") or notification_data.get("filename")
+
+    if not bucket_name or not object_name:
+        print("Error: Notification data is missing required fields (bucket, file_name or filename)")
+        return
+
+    local_file_path = object_name.split('/')[-1]
+    if not local_file_path:
+        logger.error("Error: Derived local file path is empty")
+        return
+    download_dir = "downloads/SocialMedia"
+    local_file_path = os.path.join(download_dir, local_file_path)  # Save in downloads folder
+
+    try:
+        minio_client.download_file(bucket_name, object_name, local_file_path)
+        logger.info(f"File downloaded successfully: {local_file_path}")
+    except Exception as e:
+        logger.error(f"Unexpected error occurred: {e}")
+
 
 def process_notification(notification):
     entity_id = notification.get("id")
@@ -609,19 +604,13 @@ def process_notification(notification):
     if not entity_id or not entity_type:
         logger.error(f"Invalid notification received: {notification}")
         return
-
-    logger.info(f"Processing notification for entity ID: {entity_id}, Entity type: {entity_type}")
-    print(f"Processing notification for entity ID: {entity_id}, Entity type: {entity_type}")
-
     try:
-        # Process different entity types accordingly
         if entity_type == "Alert":
             try:
                 logger.info("Triggering Alert entity processing")
                 print("Triggering Alert entity processing")
                 process_alert(notification, entity_id)
                 alert_event.set()
-
             except Exception as e:
                 logger.error(f"Error processing Alert entity ID {entity_id}: {e}")
 
@@ -643,10 +632,30 @@ def process_notification(notification):
             try:
                 logger.info("Processing EOFloodExtent entity: Downloading .tif file")
                 print("Processing EOFloodExtent entity: Downloading .tif file")
-                download_tif_file(notification)  # Call the function to download the GeoTIFF
+                roi_data = global_cache.get('roi')
+                download_tif_file(notification, roi_data)
             except Exception as e:
                 logger.error(f"Error handling EOFloodExtent for entity ID {entity_id}: {e}")
         #######################################################################################################
+        elif entity_type == "EOBurntArea":
+            try:
+                logger.info(f"Processing {entity_type} entity: Downloading .tif file")
+                print(f"Processing {entity_type} entity: Downloading .tif file")
+                roi_data = global_cache.get('roi')
+                polygon = Polygon(roi_data[0])
+                fetch_burnt_area(notification, polygon)
+            except Exception as e:
+                logger.error(f"Error handling EOBurntArea for entity ID {entity_id}: {e}")
+        #######################################################################################################
+        elif entity_type == "HotspotResult" or entity_type == "SinglePostResult":
+            try:
+                logger.info(f"Processing {entity_type} entity: Downloading .geojson file")
+                print(f"Processing {entity_type} entity: Downloading .geojson file")
+
+            except Exception as e:
+                logger.error(f"Error handling EOBurntArea for entity ID {entity_id}: {e}")
+        #######################################################################################################
+
         else:
             try:
                 handle_file_download(notification)
@@ -808,12 +817,12 @@ def initialize_processing():
 
             if other_entity_event.is_set() and entities_initialized:
                 try:
-                    estimate_ND_status()
+                    estimate_nd_status()
                 except Exception as e:
                     print(f"No OGM for ND due to {e}")
                     logger.info(f"No OGM for ND due to {e}")
                 try:
-                    estimate_Objects_status()
+                    estimate_objects_status()
                 except Exception as e:
                     print(f"No OGM for objects due to {e}")
                     logger.info(f"No OGM for objects due to {e}")
@@ -841,17 +850,17 @@ def subscribe_to_entities():
     }
 
     entity_types_with_ids = {
-        "Alert": "urn:ngsi-ld:tema:subscription:USE:PDM05:001",
-        "FloodCalculationResults": "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
+        "Alert": "urn:ngsi-ld:tema:subscription:USE:PDM05:001", # Tested and able to be notified
+        "FloodCalculationResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
         "StandardArrivalTime": "urn:ngsi-ld:tema:subscription:USE:PDM05:003",
-        "FireSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:004",
-        "BurntSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:005",
-        "FloodSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:006",
-        "PersonVehicleDetection": "urn:ngsi-ld:tema:subscription:USE:PDM05:007",
-        "HotspotResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:008",
-        "SinglePostResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:009",
-        "EOBurntArea": "urn:ngsi-ld:tema:subscription:USE:PDM05:010",
-        "EOFloodExtent": "urn:ngsi-ld:tema:subscription:USE:PDM05:011",
+        "FireSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:004", # Tested and able to download
+        "BurntSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:005", # Tested and able to download
+        "FloodSegmentation": "urn:ngsi-ld:tema:subscription:USE:PDM05:006", # Tested and able to download
+        "PersonVehicleDetection": "urn:ngsi-ld:tema:subscription:USE:PDM05:007", # Tested and able to download
+        "HotspotResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:008", # Tested and able to download
+        "SinglePostResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:009", # Tested and able to download
+        "EOBurntArea": "urn:ngsi-ld:tema:subscription:USE:PDM05:010", # # Tested and able to download (href) cropped tif
+        "EOFloodExtent": "urn:ngsi-ld:tema:subscription:USE:PDM05:011", # Tested and able to download (href)
     }
 
     try:
@@ -896,8 +905,7 @@ def create_subscription(subscription_url, payload, headers):
         logger.exception("An error occurred while creating the subscription.")
         print(f"An error occurred while creating the subscription: {e}")
 
-
-def estimate_ND_status():
+def estimate_nd_status():
     global polygon_coordinates
     # polygon_coordinates = convert_to_polygon()
     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
@@ -934,8 +942,8 @@ def estimate_ND_status():
 
     # Update OGM with satellite data
     try:
-        observ_sat_data_, observ_sat_gt_, observ_sat_proj = extract_roi_from_satellite_files(
-            "downloads/satellite_imgs", roi_data)
+        observ_sat_data_, observ_sat_gt_, observ_sat_proj = load_image(
+            f"downloads/satellite_imgs/{disaster_type}", 3)
         ogm_data = update_occupancy_grid(ogm_data, ogm_gt_, observ_sat_data_, observ_sat_gt_)
         logger.info(f"OGM has successfully generated and fused sate file")
     except FileNotFoundError:
@@ -1095,7 +1103,7 @@ def fuse_fire_probability(existing_prob, hotspot_value, weight=0.5):
     return np.clip(updated_prob, 0, 1)
 
 
-def estimate_Objects_status():
+def estimate_objects_status():
     """
     Estimate objects' status and process the occupancy grid map using data
     from drones and social media posts.
@@ -2167,211 +2175,6 @@ def upscale_geotiff(input_file_, output_file_, scale_factor_x_, scale_factor_y_)
     gdal.ReprojectImage(input_ds, output_ds, None, None, gdal.GRA_Bilinear)
 
 
-def get_sate_roi(PolygonCoords):
-    if global_cache.get('natural_disaster', 'No disaster info') == "Fire":
-        try:
-            polygon = Polygon(PolygonCoords)
-
-            # Load the vector data
-            gpkg_path = ('Satellite_DLR/S2A_MSIL2A_20210814T102031_N0301_R065_T32TMK_20210814T132326.SAFE_d_f'
-                         '.gpkg')
-            gdf = gpd.read_file(gpkg_path, layer='S2A_MSIL2A_20210814T102031_N0301_R065_T32TMK_20210814T132326')
-
-            # Ensure both the data and AOI polygon are in EPSG:4326
-            gdf_4326 = gdf.to_crs(epsg=4326)
-            polygon_gdf = gpd.GeoDataFrame([1], geometry=[polygon], crs="EPSG:4326")
-
-            # Perform cropping operation
-            cropped_gdf = gpd.clip(gdf_4326, polygon_gdf)
-
-            if cropped_gdf.empty:
-                print("Cropping resulted in an empty GeoDataFrame. Check CRS alignment and polygon.")
-                logger.info("Cropping resulted in an empty GeoDataFrame. Check CRS alignment and polygon.")
-                return
-            else:
-                print(f"Cropped GeoDataFrame has {len(cropped_gdf)} geometries.")
-                logger.info(f"Cropped GeoDataFrame has {len(cropped_gdf)} geometries.")
-
-            # Generate timestamp for the output file name
-            now = datetime.now()
-            timestamp = now.strftime("%Y%m%d%H%M%S")
-            output_tiff_path = f"segmented_sat_roi_imgs/cropped_sat_data_{global_cache.get('natural_disaster', 'No disaster info')}_{timestamp}.tif"
-
-            # Save the cropped area as a GeoTIFF file
-            save_cropped_as_geotiff(cropped_gdf, output_tiff_path)
-        except Exception as e:
-            print(f"No Sat File due to {e}")
-            logger.info(f"No Sat File due to {e}")
-    else:
-        try:
-            for sat_folders in sorted(os.listdir("Satellite_DLR"), reverse=False):
-                sat_title_splits = sat_folders.split('_')
-                geo_tiff = os.path.join("Satellite_DLR", sat_folders, f"{'_'.join(sat_title_splits)}_WATER.tif")
-
-                #########################################################################
-                # Rasterio
-                #########################################################################
-                raster_layer = rasterio.open(geo_tiff)
-                ######################################################################
-                # GDAL
-                ######################################################################
-                raster_gdal = gdal.Open(geo_tiff)
-                ###################################
-                # x,y coordinates
-                ###################################
-                x_pixels = raster_gdal.RasterXSize
-                y_pixels = raster_gdal.RasterYSize
-                ###################################
-                gt = raster_gdal.GetGeoTransform()
-
-                x_t_0 = gt[0]
-                y_t_0 = gt[3]
-
-                x_w = gt[1]
-                y_w = gt[5]
-
-                x_t_1 = x_t_0 + x_pixels * x_w
-                y_t_1 = y_t_0 + y_pixels * y_w
-
-                # Calculate resolution (pixels per meter) in x and y directions
-                # resolution_x = 1 / x_w
-                # resolution_y = 1 / y_w
-                ############################################################
-                # Crop satellite image to ROI (to the information fusion map)
-                ############################################################
-
-                # Calculate latitude and longitude components
-                lat_distance, lon_distance = distance_components(y_t_0, x_t_0, y_t_1, x_t_1)
-
-                # displacement_lng = abs(x_t_1 - x_t_0)
-                # displacement_lat = abs(y_t_1 - y_t_0)
-
-                ######################################################################
-                # Calculating the lat and lng distance in meters for the satellite
-                ######################################################################
-                # lat_distance = lon_or_lat_to_meter(y_t_0, displacement_lat, 1)
-                # lon_distance = lon_or_lat_to_meter(y_t_0, displacement_lng, 0)
-
-                ######################################################################
-                lat_res_meters_per_pixel = lat_distance / raster_layer.height
-                lng_res_meters_per_pixel = lon_distance / raster_layer.width
-                ######################################################################
-                # define the dimensions of the occupancy grid map in meters
-                ######################################################################
-                cam_lat, cam_lng = 50.51681305555555, 6.985609833333333
-                w = 707.1067  # meter
-                h = 707.1067  # meter
-                map_width, map_height = abs(w / lng_res_meters_per_pixel), abs(h / lat_res_meters_per_pixel)
-
-                ######################################################################
-                # Defining a map from the Camera GPS location,
-                ######################################################################
-                lat_max = cam_lat + map_height * x_w  # Upper-left x coordinate
-                # lng_max = cam_lng - map_width * y_w # Upper-left y coordinate
-                # lat_min = cam_lat - map_height * x_w # Lower-right x coordinate
-                lng_min = cam_lng + map_width * y_w  # Lower-right y coordinate
-
-                # Get the geo_transform
-                ulx, uly = lonlat_to_pixel(gt, lng_min, lat_max)
-                #################################################################
-                # Window(col_off, row_off, width, height)
-                #################################################################
-                window = Window(ulx, uly, width=map_width * 2, height=map_height * 2)
-
-                # window = Window.from_slices((ulx, lrx), (lry, uly))
-                data = raster_layer.read(window=window, masked=True)
-                transform = raster_layer.window_transform(window)
-
-                # Create a new cropped raster to write to
-
-                profile = raster_layer.profile
-                profile.update({
-                    'height': map_height * 2,
-                    'width': map_width * 2,
-                    'transform': transform})
-                # Generate timestamp for the output file name
-                now = datetime.now()
-                timestamp = now.strftime("%Y%m%d%H%M%S")
-                path_roi = f"segmented_sat_roi_imgs/cropped_sat_data_{global_cache.get('natural_disaster', 'No disaster info')}_{timestamp}"
-                with rasterio.open(path_roi + '%s_%s.tif' % (sat_title_splits[4], sat_title_splits[5]), 'w',
-                                   **profile) as dst:
-                    # Read the data from the window and write it to the output raster
-                    dst.write(data)  # raster.read(window=window)
-
-                #################################################################################
-                # Unifying Resolutions
-                #################################################################################
-                input_file = path_roi + 'cropped_sat_roi_%s_%s.tif' % (
-                    sat_title_splits[4], sat_title_splits[5])  # Path to the
-                output_file = path_roi + 'cropped_sat_roi_%s_%s.tif' % (
-                    sat_title_splits[4], sat_title_splits[5])  # Path to the
-                scale_factor_x = abs(lng_res_meters_per_pixel)  # Upscale factor (lng_res_meters_per_pixel)
-                scale_factor_y = abs(lat_res_meters_per_pixel)  # Upscale factor (lat_res_meters_per_pixel)
-                upscale_geotiff(input_file, output_file, scale_factor_x, scale_factor_y)
-
-                #################################################################################
-                # raster_layer = None
-                # folder_to_remove = os.path.join(dir_sat, sat_folders)
-                # try:
-                #     shutil.rmtree(folder_to_remove)
-                #     print("**********************************************************")
-                #     print("Sat folder removed")
-                # except Exception as e:
-                #     print("**********************************************************")
-                #     print(f"Sat error in removing {e}")
-                # break
-        except Exception as e:
-            print(f"No Sat file due to {e}")
-
-
-def save_cropped_as_geotiff(cropped_gdf, output_path):
-    # Get the bounding box of the cropped GeoDataFrame
-    minx_, miny_, maxx_, maxy_ = cropped_gdf.total_bounds
-
-    pixel_width_ = (maxx_ - minx_) / 1414
-    pixel_height_ = (maxy_ - miny_) / 1414
-
-    # Define dimensions based on bounding box
-    ogm_width = 1414
-    ogm_height = 1414
-
-    # Define the resolution (in degrees per pixel)
-    # You can adjust this to fit your AOI size/resolution requirements
-    # resolution = 0.0001  # Adjust resolution for higher or lower pixel density
-    #
-    # # Calculate the number of rows and columns
-    # width = int((maxx - minx) / resolution)
-    # height = int((maxy - miny) / resolution)
-
-    # Define the transform (affine transformation for the GeoTIFF)
-    # transform = from_origin(minx, maxy, resolution, resolution)
-    transform = from_origin(minx_, maxy_, pixel_width_, pixel_height_)
-    # Rasterize the cropped GeoDataFrame geometries
-    shapes = [(geom, 1) for geom in cropped_gdf.geometry]  # Assign '1' to all geometries
-
-    # Create an empty raster with the dimensions based on the AOI bounding box
-    raster_data = rasterize(
-        shapes=shapes,
-        out_shape=(ogm_height, ogm_width),
-        transform=transform,
-        fill=0,  # Background value
-        dtype='float32'
-    )
-
-    # Write the rasterized output to a GeoTIFF file
-    with rasterio.open(
-            output_path,
-            'w',
-            driver='GTiff',
-            height=ogm_height,
-            width=ogm_width,
-            count=1,  # Single-band image
-            dtype='float32',
-            crs=CRS.from_epsg(4326),  # Use EPSG:4326 (WGS84)
-            transform=transform
-    ) as dst:
-        dst.write(raster_data, 1)
-
 
 ########################################################################################################################
 def load_existing_geo_dict(tiff_path):
@@ -2632,83 +2435,15 @@ def load_image(image_path, mode):
                 break
 
     elif mode == 3:  # Load the Observation of ROI satellite images TFA-08/09
-        roi_polygon = Polygon(global_cache.get('roi', [None])[0])
         for observation in sorted(os.listdir(image_path), reverse=False):
-            if observation.endswith(".jp2"):
-                observation_path = os.path.join(image_path, observation)
-
-                # Step 1: Inspect CRS of the satellite image
-                with rasterio.open(observation_path) as src:
-                    image_crs = src.crs
-                    logger.info(f"Image CRS: {image_crs}")
-
-                # Step 2: Reproject ROI polygon to match the image CRS (if necessary)
-                if str(image_crs) != "EPSG:4326":
-                    transformer = Transformer.from_crs("EPSG:4326", str(image_crs), always_xy=True)
-                    roi_polygon = transform(transformer.transform, roi_polygon)
-                    logger.info(f"Reprojected ROI Polygon: {roi_polygon}")
-
-                # Step 3: Crop the satellite image to the ROI
-                with rasterio.open(observation_path) as src:
-                    out_image, out_transform = mask(src, [roi_polygon], crop=True)
-                    out_meta = src.meta.copy()
-
-                    # Update metadata for cropped image
-                    out_meta.update({
-                        "driver": "GTiff",
-                        "height": out_image.shape[1],
-                        "width": out_image.shape[2],
-                        "transform": out_transform
-                    })
-
-                    # Save the cropped image temporarily
-                    cropped_image_path = "cropped_sate_roi_image.tif"
-                    with rasterio.open(cropped_image_path, "w", **out_meta) as dest:
-                        dest.write(out_image)
-                    logger.info(f"Cropped image saved to {cropped_image_path}")
-
-                # Step 4: Resample the cropped image to 1 meter resolution
-                with rasterio.open(cropped_image_path) as src:
-                    # Calculate scale factors for resampling
-                    current_resolution = src.res  # Current resolution (x_res, y_res)
-                    logger.info(f"Current resolution: {current_resolution}")
-
-                    scale_factor_x = current_resolution[0] / 1  # Desired resolution: 1m/pixel
-                    scale_factor_y = current_resolution[1] / 1
-
-                    # New dimensions for upscaled image
-                    new_width = int(src.width * scale_factor_x)
-                    new_height = int(src.height * scale_factor_y)
-
-                    # Update metadata for the upscaled image
-                    upscale_meta = src.meta.copy()
-                    upscale_meta.update({
-                        "driver": "GTiff",
-                        "height": new_height,
-                        "width": new_width,
-                        "transform": src.transform * rasterio.Affine.scale(1 / scale_factor_x, 1 / scale_factor_y)
-                    })
-
-                    # Resample the image to the new resolution
-                    upscaled_image = src.read(
-                        out_indexes=1,
-                        out_shape=(new_height, new_width),
-                        resampling=Resampling.bilinear
-                    )
-
-                    # Save the upscaled image
-                    upscaled_image_path = "cropped_sate_roi_image_1m_resolution.tif"
-                    with rasterio.open(upscaled_image_path, "w", **upscale_meta) as dest:
-                        dest.write(upscaled_image, 1)
-                    logger.info(f"Upscaled cropped image saved to {upscaled_image_path}")
-
-                process_observation(os.path.join(image_path, upscaled_image_path))
+            if observation.endswith(".tif"):
+                logger.info(f"processing segmented drone images {observation}")
                 full_path = os.path.join(image_path, observation)
-                full_path_ = os.path.join(image_path, upscaled_image_path)
+                process_observation(os.path.join(image_path, observation))
+                ##############################################################
+                # Clean up the old temporary file if it exists
                 if os.path.exists(full_path):
                     os.remove(full_path)
-                if os.path.exists(full_path_):
-                    os.remove(full_path_)
                 break
 
     elif mode == 4:  # Load the Observation of predictive models
@@ -3615,29 +3350,6 @@ def extract_roi_from_satellite_files(image_path, roi_coords):
 #####################################################################
 # Subscriptions: listing and deletion
 #####################################################################
-def delete_all_subscriptions():
-    subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"
-    headers = {"Accept": "application/ld+json"}
-
-    response = requests.get(subscription_url, headers=headers)
-    if response.status_code == 200:
-        subscriptions = response.json()
-        print(f"Found {len(subscriptions)} subscriptions to delete.")
-
-        for subscription in subscriptions:
-            subscription_id = subscription.get("id")
-            if subscription_id:
-                delete_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions/{subscription_id}"
-                delete_response = requests.delete(delete_url)
-                if delete_response.status_code == 204:
-                    print(f"Subscription {subscription_id} deleted successfully.")
-                else:
-                    print(f"Failed to delete subscription {subscription_id}.")
-                    print(f"Error: {delete_response.text}")
-    else:
-        print(f"Failed to retrieve subscriptions. Status code: {response.status_code}")
-        print(f"Error: {response.text}")
-
 
 def list_subscriptions():
     subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"

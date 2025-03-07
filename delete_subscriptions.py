@@ -56,6 +56,7 @@ subscriptions_to_delete = [
     ################################################
     # PDM05
     # ################################################
+    "urn:ngsi-ld:tema:subscription:USE:PDM05:001",
     "urn:ngsi-ld:tema:subscription:USE:PDM05:002",
     "urn:ngsi-ld:tema:subscription:USE:PDM05:003",
     "urn:ngsi-ld:tema:subscription:USE:PDM05:004",

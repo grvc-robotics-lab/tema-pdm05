@@ -49,7 +49,8 @@ ENV PROCESSING_UNIT=cpu
 ENV PUBLIC_IP_ADDRESS=tema-project.ddns.net
 ENV BASE_PATH=/pdm05
 ENV API_ENDPOINT=notify
-
+# Export the export OpenTopography_api_key
+ENV OpenTopography_api_key=56da0f69ae202d4d9414278b0f6537bd
 # Expose the necessary port
 EXPOSE 5505
 
