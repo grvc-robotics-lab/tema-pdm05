@@ -764,13 +764,13 @@ def initialize_processing():
                                 logger.info(f"Deleted file: {file_path}")
                 ###########################################################
                 # Delete existing files in the geo-referenced drone images
-                # georeferenced_imgs = "georeferenced_drone_images"
-                # if os.path.isdir(georeferenced_imgs):
-                #     for file in os.listdir(georeferenced_imgs):
-                #         file_path = os.path.join(georeferenced_imgs, file)
-                #         if os.path.isfile(file_path):
-                #             os.remove(file_path)
-                #             logger.info(f"Deleted file: {file_path}")
+                georeferenced_imgs = "georeferenced_drone_images"
+                if os.path.isdir(georeferenced_imgs):
+                    for file in os.listdir(georeferenced_imgs):
+                        file_path = os.path.join(georeferenced_imgs, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                            logger.info(f"Deleted file: {file_path}")
                 ###########################################################
                 initialize_entities()
                 entities_initialized = True
