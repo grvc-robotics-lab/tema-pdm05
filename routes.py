@@ -10,27 +10,26 @@ import config
 import geopandas as gpd
 import queue
 import json
-import fiona
 
 from flask import Flask, request, jsonify, Response
 from flask_socketio import SocketIO
 from osgeo import gdal, osr, ogr
-from rasterio.features import geometry_mask, rasterize
-from rasterio.transform import from_origin, from_bounds, rowcol, xy
+from rasterio.features import geometry_mask  #, rasterize
+from rasterio.transform import from_origin, from_bounds #,  row col, xy
 from Kalman_filter_estimating_Objects import KalmanFilter
 from georeferencing_module import main
 from minio_client import MinIOClient
 from logging_config import logger
 from pyproj import CRS, Transformer
-from datetime import timedelta
-from rasterio.windows import Window
-from datetime import datetime
-from shapely.geometry import Polygon, box, mapping, shape
-from shapely.ops import transform
+# from datetime import timedelta
+# from rasterio.windows import Window
+# from datetime import datetime
+from shapely.geometry import Polygon, box, shape  # mapping,
+# from shapely.ops import transform
 from concurrent.futures import ThreadPoolExecutor
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+# from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.mask import mask
-from threading import Thread, Lock
+from threading import Lock # Thread,
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -217,10 +216,9 @@ def handle_person_vehicle_detection(notification, parameters):
 
         logger.info(f"Files written successfully: {json_file_path_metadata}, {json_file_path_detection}")
 
-        # Call main function for geo-referencing
         try:
             disaster_info = global_cache.get('natural_disaster', 'No disaster info')
-            main(disaster_info, "bbox")
+            main(disaster_info, "bbox", ground_resolution=5)
             logger.info("Geo-referencing is done correctly for person and vehicles.")
         except Exception as e:
             logger.error(f"Issue in geo-referencing due to {e}")
@@ -255,7 +253,7 @@ def handle_segmentation(notification):
             logger.info(f"File downloaded successfully to {downloaded_file_path}")
             print(f"File downloaded successfully to {downloaded_file_path}")
             try:
-                main(disaster, "segmented")
+                main(disaster, "segmented", ground_resolution=10)
                 logger.info("Geo-referencing is done correctly for segmented images.")
             except Exception as e:
                 logger.error(f"Issue in geo-referencing due to {e}")
@@ -356,12 +354,12 @@ def handle_file_download(notification):
     entity_type = notification.get('type')
     minio_url = notification.get('minio_url', {}).get('value')
 
-    def log_and_download(entity_type, url, download_type):
+    def log_and_download(EntityType, url, download_type):
         """Helper function to extract bucket/filename and perform download."""
         try:
             bucket_name, file_name = extract_bucket_and_filename(url)
             logger.info(f"Extracted bucket: {bucket_name}, filename: {file_name}")
-            return download_file(entity_type, file_name, bucket_name)
+            return download_file(EntityType, file_name, bucket_name)
         except Exception as e:
             logger.error(f"Failed to handle {download_type} download: {e}", exc_info=True)
             return None
@@ -476,7 +474,7 @@ def fetch_burnt_area(notification, polygon):
 
     for geom in gdf.geometry:
         coords = [(int((x - minx) / (maxx - minx) * width), int((y - miny) / (maxy - miny) * height)) for x, y in
-                  geom.exterior.coords]
+                  geom.exterior.z_coords]
         for x, y in coords:
             if 0 <= x < width and 0 <= y < height:
                 raster_data[y, x] = 255  # Mark burnt area
@@ -766,13 +764,13 @@ def initialize_processing():
                                 logger.info(f"Deleted file: {file_path}")
                 ###########################################################
                 # Delete existing files in the geo-referenced drone images
-                georeferenced_imgs = "georeferenced_drone_images"
-                if os.path.isdir(georeferenced_imgs):
-                    for file in os.listdir(georeferenced_imgs):
-                        file_path = os.path.join(georeferenced_imgs, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                            logger.info(f"Deleted file: {file_path}")
+                # georeferenced_imgs = "georeferenced_drone_images"
+                # if os.path.isdir(georeferenced_imgs):
+                #     for file in os.listdir(georeferenced_imgs):
+                #         file_path = os.path.join(georeferenced_imgs, file)
+                #         if os.path.isfile(file_path):
+                #             os.remove(file_path)
+                #             logger.info(f"Deleted file: {file_path}")
                 ###########################################################
                 initialize_entities()
                 entities_initialized = True
@@ -785,7 +783,9 @@ def initialize_processing():
                     get_roi(polygon_coordinates, ogm_path_ND, resolution=10)
                     ##############################################################
                     output_dem_file = f"downloads/drone_imgs/{global_cache.get('natural_disaster')}/subset_dem.tif"
+                    ###########################################################
                     # Download the DEM
+                    ###########################################################
                     download_opentopography_dem(
                         api_key=config.OpenTopography_api_key,
                         output_file=output_dem_file,
@@ -808,7 +808,7 @@ def initialize_processing():
                     else:
                         print("Error occurred while masking the GeoTIFF.")
                     ##############################################################
-                    ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
+                    get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
                     logger.info(f"OGM counter --> {ogm_counter}")
                     ogm_counter += 1
                     ogm_flag = True
@@ -907,7 +907,6 @@ def create_subscription(subscription_url, payload, headers):
 
 def estimate_nd_status():
     global polygon_coordinates
-    # polygon_coordinates = convert_to_polygon()
     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
     ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
     roi_data = global_cache.get('roi')
@@ -993,8 +992,9 @@ def estimate_nd_status():
                                     hotspot_value = max(hotspot_count, hotspot_ratio)
 
                                     # Fuse hotspot value into the OGM
+                                    prior = ogm_data[y, x]
                                     ogm_data[y, x] = fuse_fire_probability(
-                                        existing_prob=ogm_data[y, x],
+                                        existing_prob=prior,
                                         hotspot_value=hotspot_value,
                                         weight=0.5  # Adjust weight as needed for confidence in hotspot data
                                     )
@@ -1102,6 +1102,32 @@ def fuse_fire_probability(existing_prob, hotspot_value, weight=0.5):
     # Clamp the result to ensure valid probability
     return np.clip(updated_prob, 0, 1)
 
+def haversine_distance(coord1, coord2):
+    """
+    Calculate the great-circle distance between two points using the Haversine formula.
+
+    :param coord1: Tuple (longitude, latitude) in degrees
+    :param coord2: Tuple (longitude, latitude) in degrees
+    :return: Distance in meters
+    """
+    R = 6371000  # Earth's radius in meters
+
+    # Convert latitude and longitude from degrees to radians
+    lat1, lon1 = map(math.radians, [coord1[1], coord1[0]])
+    lat2, lon2 = map(math.radians, [coord2[1], coord2[0]])
+
+    # Differences
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+
+    # Haversine formula
+    a = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    # Compute distance
+    distance = R * c  # Distance in meters
+    return distance
+
 
 def estimate_objects_status():
     """
@@ -1123,57 +1149,73 @@ def estimate_objects_status():
         # Integrate Drone data
         #######################################################################################
         try:
-            # Retrieve observation metadata
             observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images")
-            print("Observation Metadata Type:", type(observ_metadata))
-            logger.info("Observation Metadata Type:", type(observ_metadata))
-            print("First Entry of Observation Metadata:", observ_metadata[0] if observ_metadata else "No Data")
+            logger.info(f"Observation Metadata Type: {type(observ_metadata)}")
+            if observ_metadata:
+                ##########################################################
+                if observ_metadata:
+                    # 'observ_metadata' should be a dict with "type" and "features" keys
+                    features_list = observ_metadata.get("features", [])
+                    ogm_list = ogm_metadata.get("features", [])
+                    logger.info("Number of drone features: %d", len(features_list))
+                    # Loop over your OGM metadata
+                    for n in ogm_list:
+                        for feat in features_list:
+                            # Extract the geometry (coordinates) and properties
+                            z_cords = feat.get("geometry", {}).get("coordinates", [])
+                            ogm_cords = n.get("geometry", {}).get("coordinates", [])
+                            props = feat.get("properties", {})
 
-            if not observ_metadata:
-                logger.info("Drone metadata is empty or not available.")
+                            if not z_cords or len(z_cords) < 2:
+                                continue  # Skip if no valid coordinate set
+
+                            # Perform distance check (assuming n['coordinates'] is [lon, lat, (elev)])
+                            distance_th = haversine_distance(ogm_cords, z_cords)
+                            if distance_th < 5:
+                                # Update your OGM metadata with the drone's score/label
+                                n["properties"]["score"] = props.get("score", 0.0)
+                                n["properties"]['label'] = props.get("label", -1)
+
+                                # If both have an elevation coordinate, update
+                                if len(ogm_cords) > 2 and len(z_cords) > 2:
+                                    ogm_cords[-1] = z_cords[-1]  # Transfer elev
+
+                # Write updated metadata to JSON
+                with open(f'estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json', 'w') as file:
+                    json.dump(ogm_metadata, file, indent=4)
+                logger.info("Correctly updating the OGM with measurements")
+                ##########################################################
+                logger.info(f"Updated OGM Metadata Type: {type(ogm_metadata)}")
+                if ogm_metadata:
+                    logger.info(f"First Entry of Updated OGM Metadata: {ogm_metadata[0]}")
             else:
-                # Update OGM Metadata
-                ogm_metadata = get_observations_in_FOV(ogm_metadata, observ_metadata)
-                print("Updated OGM Metadata Type:", type(ogm_metadata))
-                print("First Entry of Updated OGM Metadata:", ogm_metadata[0] if ogm_metadata else "No Data")
+                logger.info("Drone metadata is empty or not available.")
+        except Exception as e:
+            logger.info(f"Object measurements are not available. Exception: {e}")
 
-                # Initialize the Kalman filter
-                state_dim = 2  # For position (x, y, z)
-                measurement_dim = 2  # For measurements (x, y, z)
-                assert state_dim == 2 and measurement_dim == 2, "Kalman filter dimensions mismatch"
-                kf = KalmanFilter(state_dim, measurement_dim)
+        try:
+            state_dim = 3
+            measurement_dim = 3
+            kf = KalmanFilter(state_dim, measurement_dim)
+            ogm_list = ogm_metadata.get("features", [])
+            for entry in ogm_list:
+                try:
+                    label = entry.get("properties", {}).get("label")
+                    if label == -1:
+                        continue
+                    cords = entry.get("geometry", {}).get("coordinates", [])
+                    if not isinstance(cords, list) or len(cords) != 3:
+                        continue
 
-                # Loop through each observation
-                for entry in ogm_metadata:
-                    try:
-                        # Ensure the entry has a valid label
-                        label = entry.get("label", -1)
-                        if label == -1:
-                            # logger.warning(f"Skipping entry with invalid label: {entry}")
-                            continue
+                    z = np.array(cords).reshape((measurement_dim, 1))
+                    kf.predict()
+                    kf.update(z)
 
-                        # Extract the position data
-                        key = next((k for k in entry if isinstance(entry[k], list)), None)
-                        if key:
-                            position = entry[key]  # Position is [lon, lat, elev]
-                            print(f"Position Key: {key}, Position: {position}")
-
-                            # Validate and prepare the position
-                            if len(position) == 3:  # Ensure it has an [x, y, z] format
-                                z = np.array(position).reshape((measurement_dim, 1))  # Reshape for the Kalman filter
-                                kf.predict()
-                                kf.update(z)
-
-                                # Update the entry with the new state (updated position)
-                                updated_position = kf.x.flatten().tolist()  # Convert updated state to list
-                                entry[key] = updated_position  # Update position in the entry
-                                print(f"Updated Position: {updated_position}")
-                            else:
-                                logger.warning(f"Invalid position format in entry: {position}")
-                        else:
-                            logger.warning(f"No valid position key found in entry: {entry}")
-                    except Exception as e:
-                        logger.error(f"Error updating Kalman filter for entry {entry}: {e}")
+                    updated_position = kf.x.flatten().tolist()
+                    entry["geometry"]["coordinates"] = updated_position
+                except Exception as e:
+                    logger.error(f"Error updating Kalman filter for entry {entry}: {e}")
+            logger.info(f"Kalman filter applied successfully")
         except Exception as e:
             logger.info(f"Object measurements are not available. Exception: {e}")
 
@@ -1182,118 +1224,66 @@ def estimate_objects_status():
         #######################################################################################
         try:
             metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
-            # Validate ogm_metadata before saving
             if not isinstance(ogm_metadata, list):
                 raise ValueError("ogm_metadata is not a list.")
-
+            ####################################################################
             with open(metadata_path, 'w') as f:
                 json.dump(ogm_metadata, f, indent=4)
             logger.info(f"OGM metadata successfully saved to {metadata_path}")
-
+            ####################################################################
         except ValueError as e:
             logger.error(f"Validation error for OGM metadata: {e}")
         except Exception as e:
             logger.error(f"Failed to save OGM metadata: {e}")
-
-        geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
-
-        # Generate and Save GeoJSON
-        try:
-            geojson = {"type": "FeatureCollection", "features": []}
-
-            # Iterate through OGM metadata to create GeoJSON features
-            for entry in ogm_metadata:
-                # Validate each entry
-                geo_coords = entry.get("geo_coords", [])
-                if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
-                    # logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
-                    continue
-
-                score = entry.get("score", 0.0)
-                label = entry.get("label", -1)
-
-                if label == -1:
-                    # logger.info(f"Skipping entry with label -1: {entry}")
-                    continue
-
-                # Construct the GeoJSON feature
-                feature = {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [geo_coords[0], geo_coords[1], geo_coords[2]]  # Use lon, lat, elev
-                    },
-                    "properties": {
-                        "score": score,
-                        "label": label
-                    }
-                }
-                geojson["features"].append(feature)
-
-            # Save the GeoJSON
-            with open(geojson_path, 'w') as f:
-                json.dump(geojson, f, indent=4)
-            logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
-
-        except ValueError as e:
-            logger.error(f"Validation error while creating GeoJSON: {e}")
-        except PermissionError as e:
-            logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
-        except FileNotFoundError as e:
-            logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
-        except IOError as e:
-            logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
-
         #######################################################################################
-        # Convert Geo Json to Geo Tiff
+        # Convert (Updated) GeoJSON to GeoTIFF
         #######################################################################################
         try:
-            geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
-            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+            geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
+            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects.tif"
 
             logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
+            json_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
 
-            # Validate the GeoJSON file
-            if not os.path.exists(geojson_path):
-                raise FileNotFoundError(f"GeoJSON file not found: {geojson_path}")
+            if not os.path.exists(json_path):
+                raise FileNotFoundError(f"GeoJSON file not found: {json_path}")
 
-            with open(geojson_path, 'r') as f:
+            with open(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json", 'r') as f:
                 geojson_data = json.load(f)
 
-            if not geojson_data.get("features", []):
-                raise ValueError("GeoJSON file contains no features. Cannot generate raster.")
+            if not geojson_data:
+                raise ValueError("GeoJSON file is empty or invalid. Cannot generate raster.")
 
             # Calculate raster size and validate pixel sizes
-            bbox = get_geojson_bbox(geojson_path)  # Function to compute bounding box
+            bbox = get_geojson_bbox(json_path)  # Function to compute bounding box
             logger.info(f"GeoJSON bounding box: {bbox}")
 
             if not bbox or any(k not in bbox for k in ["min_lon", "max_lon", "min_lat", "max_lat"]):
                 raise ValueError(f"Invalid or incomplete bounding box: {bbox}")
 
-            # Calculate pixel size in degrees based on the desired resolution (10 meters per pixel)
-            meters_per_degree = 111320  # Approximate value at the equator
-            pixel_size_lat = 10 / meters_per_degree  # Latitude pixel size in degrees
-            pixel_size_lon = 10 / (meters_per_degree * np.cos(np.radians((bbox["min_lat"] + bbox["max_lat"]) / 2)))
-            logger.info(f"Pixel size (degrees): Lat = {pixel_size_lat}, Lon = {pixel_size_lon}")
-
-            # Calculate raster dimensions
+            # Approx meters per degree
+            meters_per_degree = 111320
+            pixel_size_lat = 10 / meters_per_degree
+            pixel_size_lon = 10 / (
+                    meters_per_degree * np.cos(np.radians((bbox["min_lat"] + bbox["max_lat"]) / 2))
+            )
             raster_width = int((bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon)
             raster_height = int((bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat)
 
-            logger.info(f"Calculated raster size: {raster_width}x{raster_height}")
             if raster_width <= 0 or raster_height <= 0:
-                raise ValueError("Raster dimensions must be greater than zero. Check pixel sizes or bounding box.")
+                raise ValueError("Raster dimensions must be greater than zero.")
 
             # Convert GeoJSON to GeoTIFF
-            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
-            geojson_to_multi_band_geotiff(
-                geojson_path,
-                geotiff_path,
-                pixel_size_lat=pixel_size_lat,
-                pixel_size_lon=pixel_size_lon
-            )
+            try:
+                geojson_to_multi_band_geotiff(
+                    json_path,
+                    geotiff_path,
+                    pixel_size_lat=pixel_size_lat,
+                    pixel_size_lon=pixel_size_lon
+                )
+            except Exception as e:
+                print(f"Error due to {e}")
+
 
             # Load the GeoTIFF data
             logger.info(f"Loading GeoTIFF data from {geotiff_path}")
@@ -1339,8 +1329,8 @@ def estimate_objects_status():
             logger.info(f"Found {len(single_post_files)} SinglePostResult files.")
 
             # Initialize the Kalman filter
-            state_dim = 3  # For position (x, y, z)
-            measurement_dim = 3  # For measurements (x, y, z)
+            state_dim = 2  # For position (x, y, z)
+            measurement_dim = 2  # For measurements (x, y, z)
             kf = KalmanFilter(state_dim, measurement_dim)
 
             # Function to check if coordinates are within OGM bounds and FOV
@@ -1447,66 +1437,66 @@ def estimate_objects_status():
         except Exception as e:
             logger.error(f"Failed to save OGM metadata: {e}")
 
-        geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
-
-        # Generate and Save GeoJSON
-        try:
-            geojson = {"type": "FeatureCollection", "features": []}
-
-            # Iterate through OGM metadata to create GeoJSON features
-            for entry in ogm_metadata:
-                # Validate each entry
-                geo_coords = entry.get("geo_coords", [])
-                if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
-                    # logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
-                    continue
-
-                score = entry.get("score", 0.0)
-                label = entry.get("label", -1)
-
-                if label == -1:
-                    # logger.info(f"Skipping entry with label -1: {entry}")
-                    continue
-
-                # Construct the GeoJSON feature
-                feature = {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [geo_coords[0], geo_coords[1], geo_coords[2]]  # Use lon, lat, elev
-                    },
-                    "properties": {
-                        "score": score,
-                        "label": label
-                    }
-                }
-                geojson["features"].append(feature)
-
-            # Save the GeoJSON
-            with open(geojson_path, 'w') as f:
-                json.dump(geojson, f, indent=4)
-            logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
-
-        except ValueError as e:
-            logger.error(f"Validation error while creating GeoJSON: {e}")
-        except PermissionError as e:
-            logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
-        except FileNotFoundError as e:
-            logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
-        except IOError as e:
-            logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
+        # geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
+        #
+        # # Generate and Save GeoJSON
+        # try:
+        #     geojson = {"type": "FeatureCollection", "features": []}
+        #
+        #     # Iterate through OGM metadata to create GeoJSON features
+        #     for entry in ogm_metadata:
+        #         # Validate each entry
+        #         geo_coords = entry.get("geo_coords", [])
+        #         if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
+        #             # logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
+        #             continue
+        #
+        #         score = entry.get("score", 0.0)
+        #         label = entry.get("label", -1)
+        #
+        #         if label == -1:
+        #             # logger.info(f"Skipping entry with label -1: {entry}")
+        #             continue
+        #
+        #         # Construct the GeoJSON feature
+        #         feature = {
+        #             "type": "Feature",
+        #             "geometry": {
+        #                 "type": "Point",
+        #                 "coordinates": [geo_coords[0], geo_coords[1], geo_coords[2]]  # Use lon, lat, elev
+        #             },
+        #             "properties": {
+        #                 "score": score,
+        #                 "label": label
+        #             }
+        #         }
+        #         geojson["features"].append(feature)
+        #
+        #     # Save the GeoJSON
+        #     with open(geojson_path, 'w') as f:
+        #         json.dump(geojson, f, indent=4)
+        #     logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
+        #
+        # except ValueError as e:
+        #     logger.error(f"Validation error while creating GeoJSON: {e}")
+        # except PermissionError as e:
+        #     logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
+        # except FileNotFoundError as e:
+        #     logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
+        # except IOError as e:
+        #     logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
+        # except Exception as e:
+        #     logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
 
         #######################################################################################
         # Convert Geo Json to Geo Tiff
         #######################################################################################
         try:
-            geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
-            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects_filtered.tif"
+            geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
+            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects.tif"
 
             logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
-
+            geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
             # Validate the GeoJSON file
             if not os.path.exists(geojson_path):
                 raise FileNotFoundError(f"GeoJSON file not found: {geojson_path}")
@@ -1587,31 +1577,103 @@ def get_geojson_bbox(geojson_path):
     with open(geojson_path, 'r') as f:
         geojson_data = json.load(f)
 
-    coordinates = []
+    # ---------------------------------------------------------------
+    # Normalize the geojson_data into a "FeatureCollection"-like dict
+    # ---------------------------------------------------------------
+    if isinstance(geojson_data, list):
+        # If it's a list, assume it's a list of Features
+        geojson_data = {
+            "type": "FeatureCollection",
+            "features": geojson_data
+        }
+    elif isinstance(geojson_data, dict):
+        # If it's a dict but not a FeatureCollection, try to wrap it
+        # in a FeatureCollection if it looks like a single Feature
+        if "features" not in geojson_data and geojson_data.get("type") == "Feature":
+            geojson_data = {
+                "type": "FeatureCollection",
+                "features": [geojson_data]
+            }
+    else:
+        raise ValueError("GeoJSON root object is neither a dict nor a list.")
+
+    if "features" not in geojson_data:
+        raise ValueError("No 'features' field found in GeoJSON data.")
+
+    # ---------------------------------------------------------------
+    # Extract coordinates from each Feature's geometry
+    # ---------------------------------------------------------------
+    all_coords = []
 
     for feature in geojson_data.get("features", []):
         geometry = feature.get("geometry", {})
+        if not isinstance(geometry, dict):
+            # Guard against malformed geometry entries
+            continue
+
         geom_type = geometry.get("type")
+        coords = geometry.get("coordinates", [])
 
         if geom_type == "Point":
-            # Append single coordinate
-            coordinates.append(geometry["coordinates"])
-        elif geom_type == "Polygon":
-            # Extract and flatten polygon coordinates
-            for polygon in geometry.get("coordinates", []):
-                coordinates.extend(polygon)
-        elif geom_type == "MultiPolygon":
-            # Extract and flatten multi-polygon coordinates
-            for multi_polygon in geometry.get("coordinates", []):
-                for polygon in multi_polygon:
-                    coordinates.extend(polygon)
+            # coords = [lon, lat, (optional elev)]
+            _extract_point_coords(coords, all_coords)
 
-    if not coordinates:
+        elif geom_type == "MultiPoint":
+            # coords = [[lon1, lat1], [lon2, lat2], ...]
+            for point_coords in coords:
+                _extract_point_coords(point_coords, all_coords)
+
+        elif geom_type == "LineString":
+            # coords = [[lon1, lat1], [lon2, lat2], ...]
+            for point_coords in coords:
+                _extract_point_coords(point_coords, all_coords)
+
+        elif geom_type == "MultiLineString":
+            # coords = [ [[lon1, lat1], [lon2, lat2]], [...], ... ]
+            for linestring in coords:
+                for point_coords in linestring:
+                    _extract_point_coords(point_coords, all_coords)
+
+        elif geom_type == "Polygon":
+            # coords = [
+            #   [ [lon1, lat1], [lon2, lat2], ... ],  # exterior ring
+            #   [ [lon1, lat1], [lon2, lat2], ... ],  # hole
+            #   ...
+            # ]
+            for ring in coords:
+                for point_coords in ring:
+                    _extract_point_coords(point_coords, all_coords)
+
+        elif geom_type == "MultiPolygon":
+            # coords = [
+            #   [ [ [lon, lat], [lon, lat], ... ], [ring2], ... ],  # poly 1
+            #   [ [ [lon, lat], [lon, lat], ... ], ... ],           # poly 2
+            # ]
+            for polygon in coords:
+                for ring in polygon:
+                    for point_coords in ring:
+                        _extract_point_coords(point_coords, all_coords)
+
+        elif geom_type == "GeometryCollection":
+            # geometry: { "type": "GeometryCollection", "geometries": [ ... ] }
+            # Each sub-geometry has its own type/coordinates
+            sub_geoms = geometry.get("geometries", [])
+            for sub_geom in sub_geoms:
+                sub_type = sub_geom.get("type")
+                sub_coords = sub_geom.get("coordinates", [])
+                # Recursively extract
+                _extract_by_type(sub_type, sub_coords, all_coords)
+
+        else:
+            # If there's some unknown geometry type or empty geometry, skip
+            continue
+
+    if not all_coords:
         raise ValueError("No valid coordinates found in GeoJSON.")
 
     # Separate longitudes and latitudes
     try:
-        lons, lats = zip(*coordinates)
+        lons, lats = zip(*all_coords)
     except ValueError:
         raise ValueError("Malformed coordinate structure in GeoJSON.")
 
@@ -1621,6 +1683,49 @@ def get_geojson_bbox(geojson_path):
         "min_lat": min(lats),
         "max_lat": max(lats)
     }
+
+def _extract_point_coords(coords, all_coords):
+    """
+    Helper function to safely extract lon/lat from a coordinate array,
+    ignoring any 3D altitude dimension.
+    """
+    if (
+        isinstance(coords, list) and len(coords) >= 2
+        and isinstance(coords[0], (int, float))
+        and isinstance(coords[1], (int, float))
+    ):
+        # Only keep the first two elements (lon, lat)
+        all_coords.append((coords[0], coords[1]))
+
+def _extract_by_type(geom_type, coords, all_coords):
+    """Handles geometry extraction for sub-geometries."""
+    if geom_type == "Point":
+        _extract_point_coords(coords, all_coords)
+    elif geom_type == "MultiPoint":
+        for pt in coords:
+            _extract_point_coords(pt, all_coords)
+    elif geom_type == "LineString":
+        for pt in coords:
+            _extract_point_coords(pt, all_coords)
+    elif geom_type == "MultiLineString":
+        for line in coords:
+            for pt in line:
+                _extract_point_coords(pt, all_coords)
+    elif geom_type == "Polygon":
+        for ring in coords:
+            for pt in ring:
+                _extract_point_coords(pt, all_coords)
+    elif geom_type == "MultiPolygon":
+        for poly in coords:
+            for ring in poly:
+                for pt in ring:
+                    _extract_point_coords(pt, all_coords)
+    elif geom_type == "GeometryCollection":
+        for sg in coords.get("geometries", []):
+            st = sg.get("type")
+            sc = sg.get("coordinates", [])
+            _extract_by_type(st, sc, all_coords)
+    # else: ignore unknown geometry types
 
 
 def load_raster(filename):
@@ -1633,87 +1738,6 @@ def load_raster(filename):
         return data, transform_, crs
     except Exception as e:
         logger.info(f"Raster was not loaded due to {e}")
-
-
-def create_empty_grid(polygon_coords_, pixel_width_, pixel_height_):
-    """Create an empty occupancy grid based on polygon coordinates."""
-    minx_, miny_ = np.min(polygon_coords_, axis=0)
-    maxx_, maxy_ = np.max(polygon_coords_, axis=0)
-
-    # Define dimensions based on bounding box
-    ogm_width = 1414
-    ogm_height = 1414
-
-    occupancy_grid_data = np.zeros((ogm_height, ogm_width), dtype=np.float32)
-    occupancy_grid_data = np.full_like(occupancy_grid_data, 0.01)  # Start with neutral prior
-
-    transform_ = from_origin(minx_, maxy_, pixel_width_, pixel_height_)
-
-    return occupancy_grid_data, transform_
-
-
-def get_intersected_data(existing_data, existing_transform, new_polygon_coords):
-    """Transfer intersected data from an existing ROI map to a new map."""
-    new_polygon = Polygon(new_polygon_coords)
-    mask = geometry_mask([new_polygon], transform=existing_transform, invert=True, out_shape=existing_data.shape)
-    intersected_data = np.where(mask, existing_data, 0)
-    return intersected_data
-
-
-def reorder_polygon(polygon1, polygon2):
-    """Reorder polygon2 to match polygon1's vertex order."""
-
-    # Rotate polygon2 to start from the same point as polygon1
-    start_point = polygon1[0]
-
-    if start_point in polygon2:
-        # Find the index of the starting point in polygon2
-        start_idx = polygon2.index(start_point)
-
-        # Reorder polygon2 to start from the same point
-        reordered_polygon2 = polygon2[start_idx:] + polygon2[:start_idx]
-
-        # Check if polygon2 is in reverse order and needs to be reversed
-        if reordered_polygon2[1] != polygon1[1]:
-            reordered_polygon2.reverse()
-
-        return reordered_polygon2
-    else:
-        return None
-
-
-def generate_metadata(occupancy_grid_data, transform):
-    """
-    Generate metadata for each pixel in the occupancy grid.
-
-    Args:
-        occupancy_grid_data (np.ndarray): The occupancy grid data array.
-        transform (Affine): The transform object used to convert pixel indices to geographical coordinates.
-
-    Returns:
-        dict: A dictionary mapping pixel coordinates (as strings) to their geographical coordinates and pixel values.
-    """
-    metadata = {}
-    height, width = occupancy_grid_data.shape
-
-    for row in range(height):
-        for col in range(width):
-            # Get pixel value and convert to a standard float
-            pixel_value = float(occupancy_grid_data[row, col])  # or use occupancy_grid_data[row, col].item()
-
-            # Calculate geographical coordinates
-            x, y = transform * (col, row)  # Transform from pixel (col, row) to (x, y)
-
-            # Use a string representation for the pixel coordinates
-            pixel_key = f"{col},{row}"
-
-            # Store in the dictionary
-            metadata[pixel_key] = {
-                'geo_coordinates': (x, y),
-                'pixel_value': pixel_value
-            }
-
-    return metadata
 
 
 def get_roi(new_polygon_coords, existing_map_path, resolution, crs_epsg=4326):
@@ -2332,10 +2356,31 @@ def get_geo_dict(tiff_path):
 
         # Save the generated geo dictionary to JSON
         try:
+            ##############################################
+            geojson = {
+                "type": "FeatureCollection",
+                "features": []
+            }
+            for obj in new_geo_dict:
+                coords = obj.get("geo_coords", None)
+                if coords and len(coords) >= 2:
+                    feature = {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": coords  # e.g. [lon, lat, elev] is okay
+                        },
+                        "properties": {
+                            "score": obj.get("score", 0.0),
+                            "label": obj.get("label", -1)
+                        }
+                    }
+                    geojson["features"].append(feature)
             with open(json_file, 'w') as f:
-                json.dump(new_geo_dict, f, indent=4)
+                json.dump(geojson, f, indent=4)
                 logger.info(f"Geo dict saved to {json_file}")
-                print(f"Geo dict saved to {json_file}")
+                print(f"Geo dict saved to ----> {json_file}")
+            ##############################################
         except IOError as e:
             logger.error(f"Failed to save geo dict to {json_file}: {e}")
             print(f"Failed to save geo dict to {json_file}: {e}")
@@ -2514,17 +2559,23 @@ def geojson_to_multi_band_geotiff(geojson_file, geotiff_file, pixel_size_lat, pi
 
 def get_geotiff_metadata_rasterio(geotiff_path):
     """
-    Extract and transform metadata from GeoTIFF files with GDAL.
+    Extract and transform metadata from GeoTIFF files with GDAL,
+    returning a GeoJSON FeatureCollection of metadata.
 
     Parameters:
         geotiff_path (str): Path to a directory containing GeoTIFF files or a single GeoTIFF file.
 
     Returns:
-        list: Transformed metadata from the GeoTIFF file(s).
-        None: If an error occurs or no valid files are found.
+        dict: A GeoJSON FeatureCollection of the transformed metadata from the first valid file found.
+        None: If no valid files are found or no metadata is extracted.
     """
+    # 1) Determine which files to process
     if os.path.isdir(geotiff_path):
-        file_paths = [os.path.join(geotiff_path, f) for f in os.listdir(geotiff_path) if f.endswith("_Objects.tif")]
+        file_paths = [
+            os.path.join(geotiff_path, f)
+            for f in os.listdir(geotiff_path)
+            if f.endswith("_Objects.tif")
+        ]
     else:
         file_paths = [geotiff_path] if geotiff_path.endswith("_Objects.tif") else []
 
@@ -2532,13 +2583,14 @@ def get_geotiff_metadata_rasterio(geotiff_path):
         print("No valid '_Objects.tif' files found.")
         return None
 
+    # 2) Iterate over files in sorted order
     for file_path in sorted(file_paths):
         dataset = gdal.Open(file_path)
         if dataset is None:
             print(f"Unable to open {file_path}")
             continue
 
-        # Extract general metadata
+        # 3) Extract general metadata from the dataset
         metadata = dataset.GetMetadata()
         if 'georef_data' not in metadata:
             print(f"'georef_data' field missing in metadata for {file_path}")
@@ -2547,82 +2599,87 @@ def get_geotiff_metadata_rasterio(geotiff_path):
         try:
             data = json.loads(metadata['georef_data'])
         except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON in 'georef_data' for {file_path}: {e}")
+            logger.warning(f"Error decoding JSON from georef_data in {file_path}: {e}")
             continue
 
-            # Transform the data
-        transformed_data = []
-        for index_, item in enumerate(data):
-            key = list(item.keys())[0]  # Extract the first key (e.g., "1,114")
-            coordinates = item[key]  # Extract geographic coordinates [lon, lat, elevation]
-            score = item.get('score', 0.0)  # Extract score, default to 0.0 if missing
-            label = item.get('label', -1)  # Extract label, default to -1 if missing
+        # 4) Convert 'data' into a GeoJSON FeatureCollection
+        #    Each entry in 'data' is expected to be something like:
+        #        { "1,114": [lon, lat, elevation], "score": ..., "label": ... }
+        #    or a similar structure.
+        feature_collection = {
+            "type": "FeatureCollection",
+            "features": []
+        }
 
-            # Parse pixel coordinates from the key
+        # 'data' is presumably a list of dicts
+        if not isinstance(data, list):
+            logger.warning(f"Unexpected structure for 'georef_data' in {file_path}. Expected a list.")
+            continue
+
+        # 5) Build the features
+        for item in data:
+            # Each item is a dict with one "pixel_coords" key (like "1,114") plus 'score', 'label', etc.
+            if not isinstance(item, dict):
+                logger.warning(f"Invalid metadata format in {file_path}, skipping item: {item}")
+                continue
+
+            # Extract the "pixel coordinate" key (e.g. "1,114")
+            pixel_keys = [k for k in item.keys() if "," in k and k not in ("score", "label")]
+            if not pixel_keys:
+                logger.warning(f"No valid pixel coordinate key in item: {item}")
+                continue
+
+            # Let's just take the first such key
+            key = pixel_keys[0]
             try:
                 row, col = map(int, key.split(","))
-                pixel_coords = (row, col)  # Convert to tuple
+                pixel_coords = [row, col]
             except ValueError:
                 logger.warning(f"Invalid pixel coordinate format in key: {key}")
                 continue
 
-            # Build the geo_dict for this entry
-            geo_dict = {
-                "pixel_coords": pixel_coords,
-                "geo_coords": [float(coordinates[0]), float(coordinates[1]), float(coordinates[2])],
-                # Lon, Lat, Elevation
-                "score": score,
-                "label": label
+            # Extract geo_coords ([lon, lat, elev]) from the item
+            coordinates = item[key]
+            if not (isinstance(coordinates, list) and len(coordinates) >= 2):
+                logger.warning(f"Invalid geo_coords in item: {item}")
+                continue
+
+            # We handle up to 3 coords: [lon, lat, elev]
+            # If there's a third, keep it; otherwise set elev=0
+            lon = float(coordinates[0])
+            lat = float(coordinates[1])
+            elev = float(coordinates[2]) if len(coordinates) > 2 else 0.0
+
+            # Extract score/label
+            score = item.get('score', 0.0)
+            label = item.get('label', -1)
+
+            # Build a GeoJSON Feature
+            feature = {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [lon, lat, elev]
+                },
+                "properties": {
+                    "pixel_coords": pixel_coords,
+                    "score": score,
+                    "label": label
+                }
             }
+            feature_collection["features"].append(feature)
 
-            transformed_data.append(geo_dict)
+        # 6) If we found any features, return the FeatureCollection from the first valid file
+        if feature_collection["features"]:
+            return feature_collection
+        else:
+            logger.info(f"No valid features extracted from file: {file_path}")
 
-        if transformed_data:
-            return transformed_data  # Return the transformed data for the first valid file
-
+    # If we reach here, we didn't extract anything from any file
     logger.info("No metadata extracted from valid files.")
     return None
 
 
-# def save_geotiff(output_path_maps_, FileName, data, GTransform, projection):
-#     """
-#         Save data as a GeoTIFF file
-#     """
-#     data = np.array(data)
-#     driver = gdal.GetDriverByName('GTiff')
-#     if not driver:
-#         logging.error('GTiff driver is not available.')
-#         return
-#     height, width = data.shape
-#
-#     dataset_ogm = driver.Create(os.path.join(output_path_maps_, FileName), width, height, 1, gdal.GDT_Float32)
-#     dataset_ogm.SetGeoTransform(GTransform)
-#     dataset_ogm.SetProjection(projection)
-#
-#     # Define the CRS using EPSG code (EPSG:4326 for WGS 84)
-#     srs = osr.SpatialReference()
-#     srs.ImportFromEPSG(4326)
-#     dataset_ogm.SetProjection(srs.ExportToWkt())
-#     band_ = dataset_ogm.GetRasterBand(1)
-#     band_.WriteArray(data)
-#     band_.SetDescription('Estimated OGM')  # Band description
-#
-#     metadata = {
-#         'title': 'OGM',
-#         'author': 'GRVC lab, University of Seville',
-#         'description': f"Estimated OGM for {global_cache.get('natural_disaster', 'No disaster info')}.",
-#         'creationDate': datetime.now().isoformat(),  # Current date and time
-#         "XMin": GTransform[0],
-#         "XRes": GTransform[1],
-#         "YMax": GTransform[3],
-#         "YRes": GTransform[5],
-#         "spatialReference": 'EPSG:4326 for WGS 84',
-#         "file_name": FileName,
-#         "bucket": config.BUCKET_NAME
-#     }
-#     dataset_ogm.SetMetadata(metadata)
-#     dataset_ogm.FlushCache()  # Write to disk
-#     return metadata
 def save_geotiff(output_path_maps_, FileName, data, GTransform, crs_epsg=4326):
     """
     Save data as a GeoTIFF file.
@@ -2682,7 +2739,7 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, crs_epsg=4326):
         metadata = {
             'title': 'OGM',
             'author': 'GRVC lab, University of Seville',
-            'description': f"Estimated OGM for Fire.",
+            'description': f"Estimated OGM for {natural_disaster}.",
             'creationDate': datetime.now().isoformat(),  # Current date and time
             "XMin": GTransform[0],
             "XRes": GTransform[1],
@@ -2692,7 +2749,7 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, crs_epsg=4326):
             "file_name": FileName,
             "coordinates": global_cache.get('roi', [None]),
             "bucket": "naples",
-            "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/occupancy_grid_map{natural_disaster}.tif'
+            "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/{FileName}'
 
         }
         dataset_ogm.SetMetadata(metadata)
@@ -3055,7 +3112,7 @@ def is_within_fov(ogm_coords, obs_coords, tolerance=0.001):
 
 def get_observations_in_FOV(georef_ogm, georef_observation):
     """
-    Update the occupancy grid using georeferenced dictionaries.
+    Update the occupancy grid using geo-referenced dictionaries.
 
     Parameters:
         georef_ogm (list): List of dictionaries representing the occupancy grid map (OGM).
@@ -3155,229 +3212,3 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
         logger.error(f"Error updating NGSI-LD entity: {e}")
 
 
-def extract_roi_from_satellite_files(image_path, roi_coords):
-    """
-    Extract the ROI area from .jp2 or .gpkg satellite files and return data, GeoTransform, and projection.
-    Upscales the raster ROI to 1 pixel per meter resolution.
-
-    Args:
-        image_path (str): Directory path containing satellite images.
-        roi_coords (list): Coordinates of the ROI polygon in EPSG:4326.
-
-    Returns:
-        tuple: Three lists:
-            - observ_sat_data_ (list): Extracted data (numpy array for .jp2, GeoDataFrame for .gpkg).
-            - observ_sat_gt_ (list): GeoTransform for .jp2 files (None for .gpkg).
-            - observ_sat_proj (list): Projection (CRS string) for each file.
-    """
-    # Validate ROI coordinates
-    if not isinstance(roi_coords, list) or not roi_coords or not isinstance(roi_coords[0], list):
-        logger.error("ROI coordinates must be a nested list of [lon, lat] pairs.")
-        raise ValueError("ROI coordinates must be a nested list of [lon, lat] pairs.")
-
-    try:
-        roi_polygon = Polygon(roi_coords[0])  # Create Polygon from the outer ring
-    except Exception as e:
-        logger.error(f"Invalid ROI coordinates: {e}")
-        raise ValueError(f"Invalid ROI coordinates: {e}")
-
-    # Validate image path
-    if not os.path.isdir(image_path):
-        logger.warning(f"Image path does not exist or is not a directory: {image_path}")
-        raise FileNotFoundError(f"Image path does not exist or is not a directory: {image_path}")
-
-    # Initialize results lists
-    observ_sat_data_ = None
-    observ_sat_gt_ = None
-    observ_sat_proj = None
-
-    # Search for satellite files
-    satellite_files = [f for f in os.listdir(image_path) if f.endswith((".jp2", ".gpkg"))]
-    if not satellite_files:
-        print("No satellite files (.jp2 or .gpkg) found in the directory.")
-        return observ_sat_data_, observ_sat_gt_, observ_sat_proj
-
-    for sat_file in satellite_files:
-        logger.info(f"Processing satellite file {sat_file}")
-        sat_file_path = os.path.join(image_path, sat_file)
-        try:
-            if sat_file.endswith(".jp2"):
-                with rasterio.open(sat_file_path) as src:
-                    image_crs = src.crs
-
-                    # Assign CRS if missing
-                    if image_crs is None:
-                        image_crs = CRS.from_epsg(32632)
-
-                    transformer = Transformer.from_crs("EPSG:4326", str(image_crs), always_xy=True)
-                    roi_polygon_projected = Polygon([
-                        transformer.transform(*coord) for coord in roi_polygon.exterior.coords
-                    ])
-
-                    raster_bounds_polygon = box(*src.bounds)
-                    if not raster_bounds_polygon.intersects(roi_polygon_projected):
-                        logger.warning("ROI does not intersect raster bounds. Skipping.")
-                        continue
-
-                    try:
-                        geojson_roi = [mapping(roi_polygon_projected)]
-                        out_image, out_transform = mask(src, geojson_roi, crop=True)
-
-                        if src.nodata is not None:
-                            out_image[out_image == src.nodata] = np.nan
-
-                        non_nan_pixels = np.count_nonzero(~np.isnan(out_image))
-
-                        if non_nan_pixels == 0:
-                            logger.warning("Cropped satellite area contains only NoData values. Skipping.")
-                            continue
-
-                        # Target CRS
-                        dst_crs = CRS.from_epsg(4326)
-                        dst_transform, dst_width, dst_height = calculate_default_transform(
-                            image_crs, dst_crs, out_image.shape[2], out_image.shape[1], *src.bounds
-                        )
-                        reprojected_image = np.empty((out_image.shape[0], dst_height, dst_width), dtype=out_image.dtype)
-
-                        try:
-                            # Explicitly pass the manually assigned CRS (image_crs) to src_crs
-                            reproject(
-                                source=out_image,
-                                destination=reprojected_image,
-                                src_transform=out_transform,
-                                src_crs=image_crs,  # Use the manually assigned CRS
-                                dst_transform=dst_transform,
-                                dst_crs=dst_crs,
-                                resampling=Resampling.bilinear,
-                            )
-                        except Exception as e:
-                            logger.warning(f"Reprojection failed: {e}")
-                            continue
-
-                        logger.info(f"Reprojected image shape: {reprojected_image.shape}")
-                        logger.info(f"Reprojected transform: {dst_transform}")
-                        logger.info(f"Reprojected CRS: {dst_crs.to_string()}")
-
-                        # Append results
-                        observ_sat_data_ = (reprojected_image)
-                        observ_sat_gt_ = (dst_transform)
-                        observ_sat_proj = (dst_crs.to_string())
-
-                        # Attempt to delete processed file
-                        try:
-                            os.remove(sat_file_path)
-                            print(f"Deleted processed file: {sat_file}")
-                        except Exception as e:
-                            print(f"Error deleting file {sat_file}: {e}")
-
-                        return observ_sat_data_, observ_sat_gt_, observ_sat_proj
-                    except Exception as e:
-                        logger.error(f"Error while processing {sat_file}: {e}", exc_info=True)
-                        continue
-
-            elif sat_file.endswith(".gpkg"):
-                layers = fiona.listlayers(sat_file_path)
-                layer_name = layers[0]
-                gdf = gpd.read_file(sat_file_path, layer=layer_name)
-                aoi_coords = roi_coords
-                aoi_gdf = gpd.GeoDataFrame([{"geometry": Polygon(aoi_coords[0])}], crs="EPSG:4326")
-                aoi_gdf = aoi_gdf.to_crs(gdf.crs)
-
-                # Step 4: Perform the intersection
-                # Validate geometries
-                gdf["geometry"] = gdf["geometry"].buffer(0)
-                aoi_gdf["geometry"] = aoi_gdf["geometry"].buffer(0)
-
-                # Perform intersection
-                intersected_area = gpd.overlay(gdf, aoi_gdf, how="intersection")
-
-                # Step 5: Check results and reproject to EPSG:4326
-                if intersected_area.empty:
-                    logger.warning("No intersection found between AOI and satellite image.")
-                else:
-                    intersected_area = intersected_area.to_crs(epsg=4326)
-                    # Step 6: Extract data, geotransform, and projection
-                    if intersected_area.crs is None or intersected_area.crs != "EPSG:4326":
-                        intersected_area = intersected_area.to_crs("EPSG:4326")
-                    ##############################################################
-                    # Get the bounds of the intersected area
-                    minx, miny, maxx, maxy = intersected_area.total_bounds
-                    # Calculate the center latitude of the intersected area
-                    center_latitude = (miny + maxy) / 2
-                    # Constants
-                    meters_per_degree_at_equator = 111319  # Approx. meters per degree at the equator
-                    # Adjust meters per degree for the center latitude
-                    meters_per_degree = meters_per_degree_at_equator * math.cos(math.radians(center_latitude))
-                    # Calculate degrees per pixel for 15 meters
-                    resolution = 15 / meters_per_degree
-                    # Define raster parameters
-                    width = int((maxx - minx) / resolution)
-                    height = int((maxy - miny) / resolution)
-                    ##############################################################
-                    if width <= 0 or height <= 0:
-                        raise ValueError("Raster width and height must be greater than 0.")
-                    # Compute the GeoTransform
-                    gt_transform = from_bounds(minx, miny, maxx, maxy, width, height)
-                    # Rasterize the geometry
-                    geometry = [mapping(geom) for geom in intersected_area.geometry]
-                    rasterized = rasterize(
-                        [(geom, 1) for geom in geometry],  # Assign a value of 1 to intersected areas
-                        out_shape=(height, width),
-                        transform=gt_transform,
-                        fill=0,
-                        dtype="uint8"
-                    )
-                    # Projection
-                    crs = "EPSG:4326"
-                    # Output results
-                    observ_sat_data_ = rasterized
-                    observ_sat_gt_ = gt_transform
-                    observ_sat_proj = crs
-
-                # Attempt to delete processed file
-                try:
-                    os.remove(sat_file_path)
-                    print(f"Deleted processed file: {sat_file}")
-                except Exception as e:
-                    print(f"Error deleting file {sat_file}: {e}")
-
-                return observ_sat_data_, observ_sat_gt_, observ_sat_proj
-
-        except Exception as e:
-            print(f"Error processing {sat_file}: {e}")
-
-
-#####################################################################
-# Subscriptions: listing and deletion
-#####################################################################
-
-def list_subscriptions():
-    subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"
-    headers = {
-        "Accept": "application/ld+json"
-    }
-    response = requests.get(subscription_url, headers=headers)
-    if response.status_code == 200:
-        subscriptions = response.json()
-        print("Active subscriptions:", subscriptions)
-        return subscriptions
-    else:
-        print(f"Failed to retrieve subscriptions. Status code: {response.status_code}")
-        print(f"Error: {response.text}")
-        return []
-
-
-def log_active_subscriptions():
-    subscription_url = f"{config.BROKER_URL}/ngsi-ld/v1/subscriptions"
-    headers = {"Accept": "application/ld+json"}
-
-    response = requests.get(subscription_url, headers=headers)
-    if response.status_code == 200:
-        subscriptions = response.json()
-        for sub in subscriptions:
-            print(f"Subscription ID: {sub.get('id')}")
-            print(f"Entities: {sub.get('entities')}")
-            print(f"Notification Endpoint: {sub['notification']['endpoint']['uri']}")
-    else:
-        print(f"Failed to retrieve subscriptions. Status code: {response.status_code}")
-        print(f"Error: {response.text}")

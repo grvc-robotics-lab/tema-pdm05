@@ -2,20 +2,19 @@ import numpy as np
 import os
 from PIL import Image
 from skimage.transform import downscale_local_mean
-from math import sqrt, radians, sin, cos, tan, pi
+from math import sqrt, radians, degrees, sin, cos, tan, atan, pi
 from osgeo import gdal, osr
 import rasterio
 import json
 from pyproj import Transformer
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
-
 from logging_config import logger
 
 path = None
 
 
-def main(natural_disaster, flag):
+def main(natural_disaster, flag, ground_resolution):
     global path
     disaster = natural_disaster
     if natural_disaster == 'Flood':
@@ -27,7 +26,6 @@ def main(natural_disaster, flag):
 
     # Parameter selection
     downsampling = True
-    downsampling_factors = (4, 4)  # (height, width)
     coordinate_system = 4326  # For GeoTIFF use coordinate system EPSG:4326 or EPSG:3857
     terrain_model = 'uneven'  # Select between 'flat' and 'uneven'
     parallel_processing = True
@@ -113,7 +111,7 @@ def main(natural_disaster, flag):
                     run_geo(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
                             max_elevation,
                             min_elevation, dem_bounds,
-                            dem_res_geo, dem_res_meter, downsampling, downsampling_factors, coordinate_system,
+                            dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
                             terrain_model, parallel_processing, flag)
 
         elif flag == "bbox":
@@ -126,7 +124,7 @@ def main(natural_disaster, flag):
                     run_geo(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
                             max_elevation,
                             min_elevation, dem_bounds,
-                            dem_res_geo, dem_res_meter, downsampling, downsampling_factors, coordinate_system,
+                            dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
                             terrain_model, parallel_processing, flag)
 
         #         break
@@ -143,7 +141,7 @@ def main(natural_disaster, flag):
 def run_geo(output_path, path, disaster, file_name,
             Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
             dem_res_meter,
-            downsampling, downsampling_factors, coordinate_systeme, terrain_model, parallel_processing, flag):
+            downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing, flag):
     # Inputs
     image_path = path + file_name
 
@@ -158,7 +156,11 @@ def run_geo(output_path, path, disaster, file_name,
         metadata = create_metadata(original_metadata)
         camera_position = [value for key, value in metadata['drone_location'].items()]
         camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
-        DFOV = metadata['camera_parameters']['fov']
+        fov = metadata['camera_parameters']['fov']
+        imag_width = metadata['camera_parameters']['width']
+        imag_height = metadata['camera_parameters']['height']
+        downsampling_factors = calculate_dnsmp_factors(camera_position[3], fov[1], fov[2], imag_width, imag_height,
+                                                       ground_resolution)
         roll = camera_orientation[0]
         with Image.open(segmented_image) as img:
             image = np.array(img)
@@ -172,7 +174,7 @@ def run_geo(output_path, path, disaster, file_name,
             image[0, 0] = image[image.shape[0] - 1, image.shape[1] - 1] = image[image.shape[0] - 1, 0] = image[
                 0, image.shape[1] - 1] = 1
 
-        camera_focal_length = compute_focal_length(image_dim, DFOV)  # In pixels
+        camera_focal_length = compute_focal_length(image_dim, fov)  # In pixels
         start_pixel = (0, 0)
         end_pixel = (image_dim[0] - 1, image_dim[1] - 1)
 
@@ -208,10 +210,15 @@ def run_geo(output_path, path, disaster, file_name,
             metadata = create_metadata(original_metadata)
             camera_position = [value for key, value in metadata['drone_location'].items()]
             camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
-            DFOV = metadata['camera_parameters']['fov']
-            img_height = metadata["camera_parameters"]['height'] // downsampling_factors[0]
-            img_width = metadata["camera_parameters"]['width'] // downsampling_factors[1]
-            camera_focal_length = compute_focal_length((img_height, img_width), DFOV)  # In pixels
+            fov = metadata['camera_parameters']['fov']
+            imag_width = metadata['camera_parameters']['width']
+            imag_height = metadata['camera_parameters']['height']
+            downsampling_factors = calculate_dnsmp_factors(camera_position[3], fov[1], fov[2], imag_width, imag_height,
+                                                           ground_resolution)
+
+            img_height = imag_height // downsampling_factors[0]
+            img_width = imag_width // downsampling_factors[1]
+            camera_focal_length = compute_focal_length((img_height, img_width), fov)  # In pixels
 
             roll = camera_orientation[0]
 
@@ -221,7 +228,7 @@ def run_geo(output_path, path, disaster, file_name,
                 bounding_boxes = []
                 scores = []
                 labels = []
-                if len(bounding_data)>0:
+                if len(bounding_data) > 0:
                     for _ in range(len(bounding_data['boxes'])):
                         bounding_boxes.append(bounding_data['boxes'][_]['bbox'])
                         scores.append(bounding_data['boxes'][_]['confidence'])
@@ -239,12 +246,14 @@ def run_geo(output_path, path, disaster, file_name,
             image_emp = np.zeros((img_height, img_width))
             image_dim = (img_height, img_width)
             # Put the values of four corners as 1 (which is != 0) to be georeferenced in the ray-tracing function
-            image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[0, img_width - 1] = 1
+            image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[
+                0, img_width - 1] = 1
 
             end_pixel = (img_height - 1, img_width - 1)
 
             # The corners of the empty image should be georeferenced to be used in the GEOTIFF creation
-            crn_dic = ray_tracing(terrain_model, disaster, image_emp, (img_height, img_width), camera_position, camera_orientation,
+            crn_dic = ray_tracing(terrain_model, disaster, image_emp, (img_height, img_width), camera_position,
+                                  camera_orientation,
                                   Rot_b_c_fixed,
                                   Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
                                   min_elevation,
@@ -255,6 +264,8 @@ def run_geo(output_path, path, disaster, file_name,
                 # Find the center of mass pixel
                 cm_pixel = (int((bounding_boxes[_][1] + bounding_boxes[_][3]) / 2),
                             int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2))
+                image_emp[cm_pixel[0], cm_pixel[1]] = 1
+
                 georef_dic_obj = ray_tracing(terrain_model, disaster, image_emp, image_dim, camera_position,
                                              camera_orientation, Rot_b_c_fixed,
                                              Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data,
@@ -280,6 +291,7 @@ def create_metadata(json_data):
     This function returns camera position, orientation, and field of view by reading
     the image metadata
     '''
+    model = json_data['Model']
     lon_dms = json_data['GPSLongitude'].split()
     camera_lon = dms_to_decimal(lon_dms[0], lon_dms[2][:-1], lon_dms[3][:-2], lon_dms[4])
     lat_dms = json_data['GPSLatitude'].split()
@@ -289,15 +301,26 @@ def create_metadata(json_data):
     gimbal_roll = radians(float(json_data['GimbalRollDegree']))
     gimbal_pitch = radians(float(json_data['GimbalPitchDegree']))
     gimbal_yaw = radians(float(json_data['GimbalYawDegree']))
-    DFOV = float(json_data['FOV'].split()[0])
     img_height = int(json_data['ImageHeight'])
     img_width = int(json_data['ImageWidth'])
+
+    if model == 'ZH20T':
+        dfov = float(json_data['FOV'].split()[0])
+        hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
+    elif model == 'XT2':
+        hfov, vfov = (57.12, 42.44)
+        dfov = calculate_dfov(hfov, vfov)
+    elif model == 'ZENMUSE Z30':
+        dfov = 63.7
+        hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
+    FOV = (dfov, hfov, vfov)
     ImageMetadata = {
         "drone_location": {"longitude": camera_lon, "latitude": camera_lat, "altitude": camera_alt,
                            "altitude_rel": camera_alt_rel},
-        "camera_parameters": {"fov": DFOV, "height": img_height, "width": img_width},
+        "camera_parameters": {"fov": FOV, "height": img_height, "width": img_width},
         "gimbal_parameters": {"roll": gimbal_roll, "pitch": gimbal_pitch, "yaw": gimbal_yaw},
     }
+
     return ImageMetadata
 
 
@@ -313,16 +336,52 @@ def dms_to_decimal(degrees, minutes, seconds, direction):
     return decimal_degrees
 
 
-def compute_focal_length(iamge_dimensions, DFOV):
+def compute_focal_length(iamge_dimensions, FOV):
     '''
     This function computes a camera focal length in pixel, given the image
     width and height in pixel and diametric field of view in degrees
     '''
     height, width = iamge_dimensions[:2]
     diameter = sqrt(width ** 2 + height ** 2)
-    focal_pixel = (diameter / 2) / tan(radians(DFOV / 2))
+    focal_pixel = (diameter / 2) / tan(radians(FOV[0] / 2))
 
     return focal_pixel
+
+
+def calculate_dfov(hfov, vfov):
+    """Calculate diagonal FOV from horizontal and vertical FOV."""
+    dfov = 2 * degrees(
+        atan(
+            sqrt(
+                tan(radians(hfov / 2)) ** 2 + tan(radians(vfov / 2)) ** 2
+            )
+        )
+    )
+    return dfov
+
+
+def calculate_hv_fov(dfov, w, h):
+    """Calculate horizontal and vertical FOV from diagonal FOV and aspect ratio (width/height)."""
+    diagonal_factor = sqrt(w ** 2 + h ** 2)
+
+    hfov = 2 * degrees(
+        atan(tan(radians(dfov / 2)) * (w / diagonal_factor))
+    )
+    vfov = 2 * degrees(
+        atan(tan(radians(dfov / 2)) * (h / diagonal_factor))
+    )
+    return hfov, vfov
+
+
+def calculate_dnsmp_factors(altitude, hfov, vfov, img_width, img_height, field_resolution):
+    field_w = 2 * altitude * tan(radians(hfov) / 2)
+    field_h = 2 * altitude * tan(radians(vfov) / 2)
+    new_img_w = field_w / field_resolution
+    new_img_h = field_h / field_resolution
+    dnsmp_factor_w = int(img_width / new_img_w)
+    dnsmp_factor_h = int(img_height / new_img_h)
+
+    return (dnsmp_factor_h, dnsmp_factor_w)
 
 
 def find_ray_tip(ray, dem_bounds, dem_res_geo, dem_elevation_data, min_elevation):
@@ -423,9 +482,7 @@ def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position
                     Georef[str(i) + ',' + str(j)] = [round(item, 6) for item in [dem_lon, dem_lat]]
                 elif terrain_type == 'uneven':
                     # The ray tracing begins from this distance from the camera origin:
-                    if disaster == 'Flood': R = find_raycasting_origin(camera_position, r_dir, dem_bounds,
-                                                                       max_elevation)
-                    if disaster == 'Fire': R = 0
+                    # R = find_raycasting_origin(camera_position, r_dir, dem_bounds, max_elevation)
                     R = 0
                     base_step = np.min(abs(dem_res_meter / (r_dir[:2] + 0.0001)))
                     tin_step = False
