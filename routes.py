@@ -2869,8 +2869,8 @@ def load_image(image_path, mode):
 
                 ##############################################################
                 # Clean up the old temporary file if it exists
-                # if os.path.exists(full_path):
-                #     os.remove(full_path)
+                if os.path.exists(full_path):
+                    os.remove(full_path)
                 break
 
     elif mode == 2:  # Load the Observation of geo-referenced object drone image TFA-05
