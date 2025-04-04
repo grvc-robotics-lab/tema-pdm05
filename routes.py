@@ -1,37 +1,80 @@
+# import copy
+# import threading
+#
+# # import matplotlib.pyplot as plt
+# import requests
+# import time
+# # import math
+# import os
+# # import numpy as np
+# import rasterio
+# # import logging
+# import config
+# import geopandas as gpd
+# import queue
+# import json
+# import numpy as np
+# from scipy.optimize import linear_sum_assignment
+# from flask import Flask, request, jsonify, Response
+# from flask_socketio import SocketIO
+# from osgeo import gdal, osr, ogr
+# # from rasterio.features import geometry_mask  #, rasterize
+# from rasterio.transform import from_bounds, rowcol #,  row col, xy
+# from Kalman_filter_estimating_Objects import KalmanFilter
+# from georeferencing_module import main
+# from minio_client import MinIOClient
+# from logging_config import logger
+# from pyproj import CRS, Transformer
+# # from datetime import timedelta
+# # from rasterio.windows import Window
+# # from datetime import datetime
+# from shapely.geometry import Polygon, box, shape  # mapping,
+# # from shapely.ops import transform
+# from concurrent.futures import ThreadPoolExecutor
+# # from rasterio.warp import calculate_default_transform, reproject, Resampling
+# from rasterio.mask import mask
+# from threading import Lock # Thread,
+# from datetime import datetime, timezone
+# from urllib.parse import urlparse
+# from rasterio.warp import reproject, Resampling
+# import math
+# import logging
+
+# Standard libraries
+import copy
 import threading
-import requests
+from threading import Lock
 import time
-import math
 import os
-import numpy as np
-import rasterio
-import logging
-import config
-import geopandas as gpd
 import queue
 import json
+import math
+import logging
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
 
+# Third‑party libraries
+import requests
+import rasterio
+import geopandas as gpd
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 from flask import Flask, request, jsonify, Response
 from flask_socketio import SocketIO
 from osgeo import gdal, osr, ogr
-from rasterio.features import geometry_mask  #, rasterize
-from rasterio.transform import from_origin, from_bounds #,  row col, xy
+from rasterio.transform import from_bounds, rowcol
+from rasterio.mask import mask
+from rasterio.warp import reproject, Resampling
+from pyproj import CRS, Transformer
+from shapely.geometry import Polygon, box, shape
+
+# Local modules
+import config
 from Kalman_filter_estimating_Objects import KalmanFilter
 from georeferencing_module import main
 from minio_client import MinIOClient
 from logging_config import logger
-from pyproj import CRS, Transformer
-# from datetime import timedelta
-# from rasterio.windows import Window
-# from datetime import datetime
-from shapely.geometry import Polygon, box, shape  # mapping,
-# from shapely.ops import transform
-from concurrent.futures import ThreadPoolExecutor
-# from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rasterio.mask import mask
-from threading import Lock # Thread,
-from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 logger.info(config.CALLBACK_URL)
 print(config.CALLBACK_URL)
@@ -60,6 +103,8 @@ global_cache = {"processing": False,
                 "roi": [],
                 "expiration": "No info",
                 "ignitionPoints": "No info",
+                "alert_timestamp": "No info",
+                "bm_id": "No info"
                 }
 global_cache_lock = threading.Lock()
 
@@ -120,7 +165,6 @@ def logs_data():
 def notify():
     try:
         notification_data = request.get_json()
-        # print(f"Processing notification: {notification_data}")
         if not isinstance(notification_data, dict):
             logger.error("Invalid notification data: Expected a JSON object.")
             return jsonify({"error": "Invalid notification data format"}), 400
@@ -134,7 +178,7 @@ def notify():
                 logger.error(f"Invalid notification: Expected a dictionary, got {type(notification)}.")
                 return jsonify({"error": f"Invalid notification format: {notification}"}), 400
 
-        executor = ThreadPoolExecutor(max_workers=10)
+        executor = ThreadPoolExecutor(max_workers=32)
         futures = []
 
         for notification in notification_data["data"]:
@@ -190,19 +234,30 @@ def handle_person_vehicle_detection(notification, parameters):
         logger.error("Invalid filename format received: %s", auth_filename)
         return
 
-    metadata_file_base = auth_filename.split('.')[0]
-    detection_file = f"{metadata_file_base}_obj.json"
-    metadata_file = f"{metadata_file_base}_objects_metadata.json"
-
     # Getting disaster info from the global cache
     disaster_info = global_cache.get('natural_disaster', 'No disaster info')
     if disaster_info == 'No disaster info':
         logger.warning("No disaster information found in the cache.")
         return
 
+    metadata_file_base = auth_filename.split('.')[0]
+
+    detection_file = f"{disaster_info}_{metadata_file_base}_obj.json"
+    logger.info(f"detection_file of PersonVehicle   {detection_file}")
+
+    metadata_file = f"{disaster_info}_{metadata_file_base}_objects_metadata.json"
+    logger.info(f"metadata_file of PersonVehicle   {metadata_file}")
+
+
+    download_path = None
     # Constructing file paths
-    download_path = os.path.join("downloads", "drone_imgs", disaster_info)
+    if 'Flood' in metadata_file:
+        download_path = os.path.join("downloads", "drone_imgs", 'Flood')
+    elif 'Fire' in metadata_file:
+        download_path = os.path.join("downloads", "drone_imgs", 'Fire')
+    # logger.info(f"download_path   {download_path}")
     os.makedirs(download_path, exist_ok=True)  # Ensure directory exists
+
 
     json_file_path_metadata = os.path.join(download_path, metadata_file)
     json_file_path_detection = os.path.join(download_path, detection_file)
@@ -215,10 +270,8 @@ def handle_person_vehicle_detection(notification, parameters):
             json.dump(detection, json_file, indent=4)
 
         logger.info(f"Files written successfully: {json_file_path_metadata}, {json_file_path_detection}")
-
         try:
-            disaster_info = global_cache.get('natural_disaster', 'No disaster info')
-            main(disaster_info, "bbox", ground_resolution=5)
+            main(disaster_info, "bbox", ground_resolution=1.0)
             logger.info("Geo-referencing is done correctly for person and vehicles.")
         except Exception as e:
             logger.error(f"Issue in geo-referencing due to {e}")
@@ -237,27 +290,31 @@ def handle_segmentation(notification):
         return
 
     mask_id = auth_filename.get('mask_id')
-
+    # logger.info(f'AUTH FILENAME {mask_id}')
+    file_path = None
     if not mask_id:
         logger.warning("No mask_id found in auth_filename.")
         return
-
-    file_path = f"downloads/drone_imgs/{disaster}/{mask_id}"
-    logger.info(f"path of download {file_path}")
-    print(f"path of download {file_path}")
+    if 'Flood' in mask_id:
+        file_path = f"downloads/drone_imgs/Flood/{mask_id}"
+    elif 'Burnt' in mask_id:
+        file_path = f"downloads/drone_imgs/Fire/{mask_id}"
+    elif 'Fire' in mask_id:
+        file_path = f"downloads/drone_imgs/Fire/{mask_id}"
+    # logger.info(f"path of download {file_path}")
+    # print(f"path of download {file_path}")
 
     try:
         # Synchronous file download simulation
         downloaded_file_path = minio_client.download_file(bucket, mask_id, file_path)
         if downloaded_file_path:
             logger.info(f"File downloaded successfully to {downloaded_file_path}")
-            print(f"File downloaded successfully to {downloaded_file_path}")
+            # print(f"File downloaded successfully to {downloaded_file_path}")
             try:
-                main(disaster, "segmented", ground_resolution=10)
+                main(disaster, "segmented", ground_resolution=1.0)
                 logger.info("Geo-referencing is done correctly for segmented images.")
             except Exception as e:
                 logger.error(f"Issue in geo-referencing due to {e}")
-
         else:
             logger.error("File download failed.")
 
@@ -267,7 +324,11 @@ def handle_segmentation(notification):
 
     metadata_file_base = mask_id.split('.')[0]
     metadata_file = f"{metadata_file_base}_metadata.json"
-    json_file_path = f"downloads/drone_imgs/{disaster}/{metadata_file}"
+    json_file_path = None
+    if 'Flood' in metadata_file_base:
+        json_file_path = f"downloads/drone_imgs/Flood/{metadata_file}"
+    elif 'Fire' in metadata_file_base or 'Burnt' in metadata_file_base:
+        json_file_path = f"downloads/drone_imgs/Fire/{metadata_file}"
 
     parameters = notification.get("parameters", {}).get('value', {})
     try:
@@ -279,7 +340,7 @@ def handle_segmentation(notification):
 
 def process_alert(notification, entity_id):
     #############################################################
-    location = notification.get("location", {}).get("value", {})
+    location = notification.get("area", {}).get("value", {})
     if isinstance(location, dict) and "coordinates" in location:
         try:
             global_cache['roi'] = location['coordinates']
@@ -330,7 +391,29 @@ def process_alert(notification, entity_id):
         global_cache['ignitionPoints'] = "No info"
         logger.warning(f"Unexpected 'ignitionPoints' format for entity ID {entity_id}: {ignitionPoints}")
     #############################################################
+    alert_timestamp = notification.get("sent", {}).get("value")
+    if alert_timestamp:
+        try:
+            global_cache['alert_timestamp'] = alert_timestamp
+            logger.info(f"alert_timestamp for entity ID {entity_id}: {global_cache['alert_timestamp']}")
+        except Exception as e:
+            logger.error(f"Error accessing 'expires' value for entity ID {entity_id}: {e}")
+            global_cache['alert_timestamp'] = "No info"
+    ############################################################
+    bm_id = notification.get("bm_id", {}).get("value", None)
+    if bm_id:
+        try:
+            global_cache['bm_id'] = bm_id
+            logger.info(f"bm_id: {global_cache['bm_id']}")
+            print(f"bm_id: {global_cache['bm_id']}")
 
+        except Exception as e:
+            logger.error(f"Error accessing bm_id value for entity ID {entity_id}: {e}")
+            global_cache['bm_id'] = "Unknown event"
+    else:
+        global_cache['bm_id'] = "Unknown event"
+        logger.warning(f"Unexpected bm_id format for entity ID {entity_id}: {event_}")
+    #############################################################
 
 def extract_bucket_and_filename(url):
     """Extract bucket name and file name from the URL."""
@@ -369,26 +452,6 @@ def handle_file_download(notification):
         logger.info(f"Handling StandardArrivalTime download with URL: {minio_url}")
         downloaded_file_path = log_and_download(entity_type, minio_url, "StandardArrivalTime")
 
-    # HotspotResult SinglePostResult
-    else:
-        filename_ = notification.get('filename')
-        bucket = notification.get("bucket")
-
-        if not (isinstance(filename_, dict) and 'value' in filename_ and
-                isinstance(bucket, dict) and 'value' in bucket):
-            logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
-        elif filename_['value'] and bucket['value']:
-            try:
-                downloaded_file_path = download_file(entity_type, filename_['value'], bucket['value'])
-                if downloaded_file_path:
-                    logger.info(f"File downloaded successfully to {downloaded_file_path}")
-                    print(f"File downloaded successfully to {downloaded_file_path}")
-                else:
-                    logger.error("File download failed.")
-            except Exception as e:
-                logger.error(f"Error in downloading file: {e}", exc_info=True)
-
-    # Final fallback if no valid source was handled
     if not downloaded_file_path:
         logger.warning(
             "No valid download source found in notification. Ensure filename, bucket, data.href, or minio_url are "
@@ -503,7 +566,7 @@ def download_file(entity_type, filename_, bucket):
         file_path = f"downloads/drone_planning/{filename_['value']}"
     elif entity_type == "StandardArrivalTime":
         file_path = f"downloads/FireSim/{filename_['value']}"
-    elif entity_type == "FloodCalculationResults":
+    elif entity_type == "FloodCalculationResult":
         file_path = f"downloads/FloodSim/{filename_['value']}"
 
 
@@ -613,18 +676,20 @@ def process_notification(notification):
                 logger.error(f"Error processing Alert entity ID {entity_id}: {e}")
 
         elif entity_type == "PersonVehicleDetection":
-            try:
-                parameters = notification.get("parameters", {}).get('value', {})
-                if not parameters:
-                    raise ValueError(f"Missing parameters in notification: {notification}")
-                handle_person_vehicle_detection(notification, parameters)
-            except Exception as e:
-                logger.error(f"Error handling PersonVehicleDetection for entity ID {entity_id}: {e}")
-        elif entity_type in ["FireSegmentation", "BurntSegmentation", "FloodSegmentation"]:
+            # try:
+            parameters = notification.get("parameters", {}).get('value', {})
+            if not parameters:
+                raise ValueError(f"Missing parameters in notification: {notification}")
+            handle_person_vehicle_detection(notification, parameters)
+            # except Exception as e:
+            #     logger.error(f"Error handling PersonVehicleDetection for entity ID {entity_id}: {e}")
+
+        elif entity_type in ["FireSegmentation", "FloodSegmentation", "BurntSegmentation"]:
             try:
                 handle_segmentation(notification)
             except Exception as e:
                 logger.error(f"Error handling segmentation for entity ID {entity_id}: {e}")
+
         #######################################################################################################
         elif entity_type == "EOFloodExtent":
             try:
@@ -647,13 +712,87 @@ def process_notification(notification):
         #######################################################################################################
         elif entity_type == "HotspotResult" or entity_type == "SinglePostResult":
             try:
+                filename_ = notification.get('filename')
+                bucket = notification.get("bucket")
+                last_part_split = filename_['value'].split("/")[-1]
+                file_path = f"downloads/SocialMedia/{last_part_split}"
                 logger.info(f"Processing {entity_type} entity: Downloading .geojson file")
                 print(f"Processing {entity_type} entity: Downloading .geojson file")
-
+                ######################################################################################
+                if not (isinstance(filename_, dict) and 'value' in filename_ and
+                        isinstance(bucket, dict) and 'value' in bucket):
+                    logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
+                elif filename_['value'] and bucket['value']:
+                    try:
+                        logger.info(
+                            f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
+                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'], file_path)
+                        if downloaded_file_path:
+                            logger.info(f"File downloaded successfully to {downloaded_file_path}")
+                            print(f"File downloaded successfully to {downloaded_file_path}")
+                        else:
+                            logger.error("File download failed.")
+                    except Exception as e:
+                        logger.error(f"Error in downloading file: {e}", exc_info=True)
+                ######################################################################################
             except Exception as e:
-                logger.error(f"Error handling EOBurntArea for entity ID {entity_id}: {e}")
+                logger.error(f"Error in handling of entity ID {entity_id}: {e}")
         #######################################################################################################
-
+        elif entity_type == "FloodCalculationResult":
+            try:
+                filename_ = notification.get('filename')
+                bucket = notification.get("bucket")
+                # last_part_split = filename_['value'].split("/")[-1]
+                file_path = f"downloads/FloodSim/{filename_['value']}"
+                logger.info(f"Processing {entity_type} entity: Downloading .geotif file")
+                ######################################################################################
+                if not (isinstance(filename_, dict) and 'value' in filename_ and
+                        isinstance(bucket, dict) and 'value' in bucket):
+                    logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
+                elif filename_['value'] and bucket['value']:
+                    try:
+                        logger.info(
+                            f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
+                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'], file_path)
+                        if downloaded_file_path:
+                            logger.info(f"File downloaded successfully to {downloaded_file_path}")
+                            print(f"File downloaded successfully to {downloaded_file_path}")
+                        else:
+                            logger.error("File download failed.")
+                    except Exception as e:
+                        logger.error(f"Error in downloading file: {e}", exc_info=True)
+                ######################################################################################
+            except Exception as e:
+                logger.error(f"Error in handling of entity ID {entity_id}: {e}")
+        #######################################################################################################
+        elif entity_type == "StandardArrivalTime":
+            try:
+                filename_ = notification.get('file_name')
+                bucket = notification.get("bucket")
+                last_part_split = filename_['value'].split("/")[-1]
+                file_path = f"downloads/FireSim/{last_part_split}"
+                logger.info(f"Processing {entity_type} entity: Downloading .geotif file")
+                ######################################################################################
+                if not (isinstance(filename_, dict) and 'value' in filename_ and
+                        isinstance(bucket, dict) and 'value' in bucket):
+                    logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
+                elif filename_['value'] and bucket['value']:
+                    try:
+                        logger.info(
+                            f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
+                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'],
+                                                                          file_path)
+                        if downloaded_file_path:
+                            logger.info(f"File downloaded successfully to {downloaded_file_path}")
+                            print(f"File downloaded successfully to {downloaded_file_path}")
+                        else:
+                            logger.error("File download failed.")
+                    except Exception as e:
+                        logger.error(f"Error in downloading file: {e}", exc_info=True)
+                ######################################################################################
+            except Exception as e:
+                logger.error(f"Error in handling of entity ID {entity_id}: {e}")
+        #######################################################################################################
         else:
             try:
                 handle_file_download(notification)
@@ -711,15 +850,34 @@ def download_opentopography_dem(api_key, output_file, coordinates, dem_dataset="
     except requests.RequestException as e:
         print(f"Failed to download DEM: {e}")
 ########################################################################################################################
+def delete_files_in_directory(dir_path, skip_exts=None):
+    """
+    Deletes all files in `dir_path` except those whose extensions
+    appear in `skip_exts`.
+    """
+    if skip_exts is None:
+        skip_exts = []
+    if os.path.isdir(dir_path):
+        for file in os.listdir(dir_path):
+            # Skip any file whose extension is in skip_exts
+            if any(file.endswith(ext) for ext in skip_exts):
+                continue
+
+            file_path = os.path.join(dir_path, file)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                logger.info(f"Deleted file: {file_path}")
 
 
 def initialize_processing():
-    global entities_initialized, ogm_flag, polygon_coordinates, ogm_counter, polygon_coordinates
+    global entities_initialized, ogm_flag, polygon_coordinates, ogm_counter
+    last_processed_alert_ts = None
+    last_processed_alert_bm_id = None
+
     while True:
-        ################################################################################################################
         expiration = global_cache.get('expiration')
         if expiration == "No info":
-            time.sleep(1)
+            time.sleep(0.5)
             continue
         try:
             expiration_time = datetime.strptime(expiration, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
@@ -730,103 +888,98 @@ def initialize_processing():
         except Exception as e:
             logger.error(f"Error parsing expiration time: {e}")
             break
-        ################################################################################################################
-        # Wait for alert_event or other_entity_event to be set
-        if not (alert_event.is_set() or other_entity_event.is_set()):
-            time.sleep(0.1)
-            continue
-        try:
-            # Handle Alert-specific instantiation
-            if alert_event.is_set():
-                ogm_flag = False
-                logger.info("Received new alert notification. Resetting the information fusion.")
-                ###########################################################
-                # Delete existing files in the estimated_OGM directory
-                ogm_dir = "estimated_OGM"
-                if os.path.isdir(ogm_dir):
-                    for file in os.listdir(ogm_dir):
-                        file_path = os.path.join(ogm_dir, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                            logger.info(f"Deleted file: {file_path}")
-                disaster_type = global_cache.get('natural_disaster', 'No disaster info')
-                ###########################################################
-                # Delete existing files in the drone images
-                drone_imgs_fire = f"downloads/drone_imgs/{disaster_type}"
-                if os.path.isdir(drone_imgs_fire):
-                    for file in os.listdir(drone_imgs_fire):
-                        if file.endswith('.tif'):
-                            continue
-                        else:
-                            file_path = os.path.join(drone_imgs_fire, file)
-                            if os.path.isfile(file_path):
-                                os.remove(file_path)
-                                logger.info(f"Deleted file: {file_path}")
-                ###########################################################
-                # Delete existing files in the geo-referenced drone images
-                georeferenced_imgs = "georeferenced_drone_images"
-                if os.path.isdir(georeferenced_imgs):
-                    for file in os.listdir(georeferenced_imgs):
-                        file_path = os.path.join(georeferenced_imgs, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                            logger.info(f"Deleted file: {file_path}")
-                ###########################################################
-                initialize_entities()
-                entities_initialized = True
-                ###########################################################
-                if not ogm_flag:
-                    polygon_coordinates = convert_to_polygon()
-                    disaster_type = global_cache.get('natural_disaster', 'No disaster info')
-                    ogm_path_ND = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
-                    print(f"polygon_coordinates --> {polygon_coordinates}")
-                    get_roi(polygon_coordinates, ogm_path_ND, resolution=10)
-                    ##############################################################
-                    output_dem_file = f"downloads/drone_imgs/{global_cache.get('natural_disaster')}/subset_dem.tif"
-                    ###########################################################
-                    # Download the DEM
-                    ###########################################################
-                    download_opentopography_dem(
-                        api_key=config.OpenTopography_api_key,
-                        output_file=output_dem_file,
-                        coordinates=polygon_coordinates,
-                        dem_dataset="SRTMGL1"  # Choose "SRTMGL1" (30m resolution) or "SRTMGL3" (90m resolution)
-                    )
-                    ###########################################################
-                    result = mask_geotiff_with_polygon_exact(ogm_path_ND, global_cache.get('roi'), ogm_path_ND)
-                    if result:
-                        print(f"Masked GeoTIFF saved to {result}")
-                    else:
-                        print("Error occurred while masking the GeoTIFF.")
-                    ##############################################################
-                    ogm_path_obj = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
-                    get_roi(polygon_coordinates, ogm_path_obj, resolution=10)
-                    ##############################################################
-                    result = mask_geotiff_with_polygon_exact(ogm_path_obj, global_cache.get('roi'), ogm_path_obj)
-                    if result:
-                        print(f"Masked GeoTIFF saved to {result}")
-                    else:
-                        print("Error occurred while masking the GeoTIFF.")
-                    ##############################################################
-                    get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
-                    logger.info(f"OGM counter --> {ogm_counter}")
-                    ogm_counter += 1
-                    ogm_flag = True
-                ###########################################################
-                alert_event.clear()  # Reset Alert event for future triggers
 
+        # Wait for an event to be set (you can also use alert_event.wait(timeout) here)
+        if not (alert_event.is_set() or other_entity_event.is_set()):
+            time.sleep(0.5)
+            continue
+
+        try:
+            # Process Alert Branch:
+            if alert_event.is_set():
+                # Read the current alert timestamp from global cache
+                current_alert_ts = global_cache.get('alert_timestamp', "No info")
+                current_alert_bm_id = global_cache.get('bm_id', "No info")
+                # Only process if it is new compared to what we already processed
+                if current_alert_ts != last_processed_alert_ts or current_alert_bm_id !=last_processed_alert_bm_id:
+                    last_processed_alert_ts = current_alert_ts
+                    last_processed_alert_bm_id = current_alert_bm_id
+                    ogm_flag = False
+                    logger.info("Received new alert notification. Resetting the information fusion.")
+                    disaster_type = global_cache.get('natural_disaster', 'No disaster info')
+                    dirs_to_cleanup = [
+                        "estimated_OGM",
+                        f"downloads/drone_imgs/{disaster_type}",
+                        "georeferenced_drone_images",
+                        "downloads/drone_planning",
+                        "downloads/FloodSim",
+                        "downloads/FireSim",
+                        f"downloads/satellite_imgs/{disaster_type}",
+                        "downloads/SocialMedia"
+                    ]
+                    for path in dirs_to_cleanup:
+                        if "drone_imgs" in path:
+                            delete_files_in_directory(path, skip_exts=[".tif"])
+                        else:
+                            delete_files_in_directory(path)
+                    log_file = 'app_routes.log'
+                    if os.path.exists(log_file):
+                        open(log_file, 'w').close()
+                        logger.info(f"Cleared the contents of {log_file}")
+
+                    initialize_entities()
+                    entities_initialized = True
+
+                    if not ogm_flag:
+                        polygon_coordinates = convert_to_polygon()
+                        disaster_type = global_cache.get('natural_disaster', 'No disaster info')
+                        ogm_path_ND = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
+                        output_dem_file = f"downloads/drone_imgs/{disaster_type}/subset_dem.tif"
+                        download_opentopography_dem(
+                            api_key=config.OpenTopography_api_key,
+                            output_file=output_dem_file,
+                            coordinates=polygon_coordinates,
+                            dem_dataset="SRTMGL1"
+                        )
+                        get_roi(polygon_coordinates, ogm_path_ND, int(config.OGM_RESOLUTION), 4326, 1, output_dem_file)
+                        result = mask_geotiff_with_polygon_exact(ogm_path_ND, global_cache.get('roi'), ogm_path_ND)
+                        if result:
+                            print(f"Masked GeoTIFF saved to {result}")
+                        else:
+                            print("Error occurred while masking the GeoTIFF.")
+                        ogm_path_obj = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
+                        get_roi(polygon_coordinates, ogm_path_obj, int(config.OGM_RESOLUTION), 4326, 2, output_dem_file)
+                        result = mask_geotiff_with_polygon_exact(ogm_path_obj, global_cache.get('roi'), ogm_path_obj)
+                        if result:
+                            print(f"Masked GeoTIFF saved to {result}")
+                        else:
+                            print("Error occurred while masking the GeoTIFF.")
+                        get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif")
+                        logger.info(f"OGM counter --> {ogm_counter}")
+                        ogm_counter += 1
+                        ogm_flag = True
+                # Do not clear the alert_event here if you want it to remain active
+                # alert_event.clear()  <-- Remove this if you rely solely on the timestamp.
+
+            # Process Non‑Alert Notifications only if no new alert has arrived.
             if other_entity_event.is_set() and entities_initialized:
-                try:
-                    estimate_nd_status()
-                except Exception as e:
-                    print(f"No OGM for ND due to {e}")
-                    logger.info(f"No OGM for ND due to {e}")
-                try:
-                    estimate_objects_status()
-                except Exception as e:
-                    print(f"No OGM for objects due to {e}")
-                    logger.info(f"No OGM for objects due to {e}")
-                other_entity_event.clear()  # Reset other_entity_event for future triggers
+                # Extra check: if the global alert timestamp has changed recently,
+                # skip non‑alert processing.
+                current_alert_ts = global_cache.get('alert_timestamp', "No info")
+                if current_alert_ts != last_processed_alert_ts:
+                    logger.info("A new alert arrived. Skipping non-alert processing this iteration.")
+                    other_entity_event.clear()
+                else:
+                    try:
+                        estimate_nd_status()
+                    except Exception as e:
+                        logger.info(f"No OGM for ND due to {e}")
+                    try:
+                        estimate_objects_status()
+                    except Exception as e:
+                        logger.info(f"No OGM for objects due to {e}")
+                    other_entity_event.clear()
+
         except Exception as e:
             logger.error(f"Error during initialize_processing: {e}")
 
@@ -861,6 +1014,7 @@ def subscribe_to_entities():
         "SinglePostResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:009", # Tested and able to download
         "EOBurntArea": "urn:ngsi-ld:tema:subscription:USE:PDM05:010", # # Tested and able to download (href) cropped tif
         "EOFloodExtent": "urn:ngsi-ld:tema:subscription:USE:PDM05:011", # Tested and able to download (href)
+        "test": "urn:ngsi-ld:tema:subscription:USE:PDM05:1000",
     }
 
     try:
@@ -905,45 +1059,181 @@ def create_subscription(subscription_url, payload, headers):
         logger.exception("An error occurred while creating the subscription.")
         print(f"An error occurred while creating the subscription: {e}")
 
+def predict_ogm(ogm_file, flood_file):
+    # Open the occupancy grid map (OGM) which is our target grid.
+    with rasterio.open(ogm_file) as ogm_ds:
+        ogm_profile = ogm_ds.profile
+        ogm_data = ogm_ds.read(1)
+        dst_transform = ogm_ds.transform
+        dst_crs = ogm_ds.crs
+
+    # Open the flood prediction raster.
+    with rasterio.open(flood_file) as flood_ds:
+        flood_data = flood_ds.read(1)
+        src_transform = flood_ds.transform
+        src_crs = flood_ds.crs
+        flood_nodata = flood_ds.nodata
+
+    # Prepare an array to hold the reprojected flood data with the same shape as the OGM.
+    reprojected_flood = np.empty(shape=(ogm_profile['height'], ogm_profile['width']), dtype=np.float32)
+
+    # Reproject the flood data from its CRS (UTM) to the OGM's CRS (EPSG:4326)
+    reproject(
+        source=flood_data,
+        destination=reprojected_flood,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=Resampling.bilinear
+    )
+
+    # Create a mask for valid flood data (exclude the NoData values).
+    if flood_nodata is not None:
+        valid_mask = (reprojected_flood != flood_nodata) & np.isfinite(reprojected_flood)
+    else:
+        valid_mask = np.isfinite(reprojected_flood)
+
+    # Compute min and max from valid flood data for normalization.
+    if np.any(valid_mask):
+        flood_min = np.min(reprojected_flood[valid_mask])
+        flood_max = np.max(reprojected_flood[valid_mask])
+    else:
+        raise ValueError("No valid flood data found for normalization.")
+
+    # Normalize the reprojected flood data to the [0, 1] range.
+    normalized_flood = np.zeros_like(reprojected_flood, dtype=np.float32)
+    normalized_flood[valid_mask] = (reprojected_flood[valid_mask] - flood_min) / (flood_max - flood_min)
+
+    # Invert the normalized flood data:
+    # Now the highest flood value becomes 0 and the lowest becomes 1.
+    updated_ogm = normalized_flood
+
+    # logger.info(f"updates ogm prediction values  {updated_ogm}")
+    # Update the profile to reflect the new data type.
+    ogm_profile.update(dtype=rasterio.float32, count=1)
+
+    # Write out the updated occupancy grid map.
+    with rasterio.open(ogm_file, "w", **ogm_profile) as dst_ds:
+        dst_ds.write(updated_ogm.astype(np.float32), 1)
+
+    logger.info(f"Updated occupancy grid map written to: {ogm_file}")
+
+
+
+
 def estimate_nd_status():
     global polygon_coordinates
     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
     ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
-    roi_data = global_cache.get('roi')
-    logger.info(f"ROI data -> {roi_data}")
-    ogm_data, ogm_gt_, ogm_proj = load_image(ogm_path, 0)
-
-    # Update OGM with drone data
+    ogm_data, ogm_gt_, ogm_proj, data_type = load_image(ogm_path, 0)
+    logger.info(f"ogm_data {np.asarray(ogm_data).shape}")
+    logger.info(f"ogm_gt_ {ogm_gt_}")
+    logger.info(f"ogm_proj {ogm_proj}")
+    logger.info(f"data_type {data_type}")
+    ###################################################
+    # Prediction step
+    ###################################################
+    if disaster_type =="Flood":
+        prediction_path = "downloads/FloodSim"
+    else:
+        prediction_path = "downloads/FireSim"
+    ###################################################
     try:
-        observe_data_drone, observe_gt_drone, observe_proj_drone = load_image(
-            "georeferenced_drone_images", 1)
-        #############################
-        # Debug the type and shape of observe_data_drone
-        if observe_data_drone is not None:
-            logger.debug(f"Type of observe_data_drone: {type(observe_data_drone)}")
-            if isinstance(observe_data_drone, np.ndarray):
-                logger.debug(f"Shape of observe_data_drone: {observe_data_drone.shape}")
-                logger.debug(f"Shape of OGM_Data: {ogm_data.shape}")
-            else:
-                logger.debug("observe_data_drone is not a numpy array.")
-        else:
-            logger.debug("observe_data_drone is None.")
-        #############################
-        logger.info(f"ogm_gt_ {ogm_gt_}")
-        logger.info(f"observe_gt_drone {observe_gt_drone}")
-        observe_data_drone = observe_data_drone / 255
-        ogm_data = update_occupancy_grid(ogm_data, ogm_gt_, observe_data_drone, observe_gt_drone)
-        logger.info(f"OGM done successfully {ogm_data.shape}")
-    except FileNotFoundError:
-        logger.warning("Drone images directory not found.")
+        for pred_file in sorted(os.listdir(prediction_path),reverse=False):
+            if pred_file.endswith('.tif'):
+                pred_file = os.path.join(prediction_path,pred_file)
+                logger.info(f"prediction file ---> {pred_file}")
+                logger.info(f"OGM file ---> {ogm_path}")
+                predict_ogm(ogm_path, pred_file)
+                logger.info("prediction is performed")
+                ##################################
+                result = mask_geotiff_with_polygon_exact(ogm_path, global_cache.get('roi'), ogm_path)
+                if result:
+                    logger.info(f"Masked GeoTIFF saved to {result}")
+                else:
+                    logger.info("Error occurred while masking the GeoTIFF.")
+                ##################################
+                if os.path.exists(pred_file):
+                    os.remove(pred_file)
+                break
     except Exception as e:
-        logger.info(f"Drone measurements are not available: {e}")
+        logger.info(f"Error in prediction models due to {e}")
+    ###################################################
+    # Update OGM with drone data
+    observe_data_drone, observe_gt_drone, observe_proj_drone, data_type = load_image(
+        "georeferenced_drone_images", 1)
+    logger.info(f"observe_data_drone {np.asarray(observe_data_drone).shape}")
+    logger.info(f"observe_gt_drone {observe_gt_drone}")
+    logger.info(f"observe_proj_drone {observe_proj_drone}")
+    logger.info(f"data_type {data_type}")
+    ############################################################
+    # if observe_data_drone.max() > 1.0:
+    #     observe_data_drone = observe_data_drone.astype(np.float32) / 255.0
+    if observe_data_drone is None:
+        logger.error("observe_data_drone is None; check your data source or assignment")
+        print("observe_data_drone is None; please verify data loading.")
+    else:
+        observe_data_drone = np.asarray(observe_data_drone)
+        observe_data_drone = observe_data_drone / 255.0
+
+    ############################################################
+    logger.info(f"data_type ---> {data_type}")
+    # try:
+    if data_type == 'Flood' and observe_data_drone is not None:
+        ogm_data = np.asarray(ogm_data)
+        ogm_data = update_occupancy_grid_flood(ogm_data,
+                                               ogm_gt_,
+                                               observe_data_drone,
+                                               observe_gt_drone)
+        logger.info(f"OGM done successfully  FOR FLOOD ND {ogm_data.shape}")
+    # except Exception as e:
+    #     logger.info(f'Error in updating Flood OGM due to {e}')
+    # try:
+    if disaster_type == 'Fire' and observe_data_drone is not None:
+        if data_type == 'active_fire' or data_type == 'burnt_area':
+            ogm_data = update_occupancy_grid_fire(ogm_data,
+                                                  ogm_gt_,
+                                                  observe_data_drone,
+                                                  observe_gt_drone,
+                                                  data_type)
+            logger.info(f"OGM done successfully FOR FIRE ND {ogm_data.shape}")
+    ######################################################################
+    # Save updated OGM as GeoTIFF
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_tiff_path_timestamp = f"occupancy_grid_map_{disaster_type}_{timestamp}.tif"
+
+        output_tiff_path = f"occupancy_grid_map_{disaster_type}.tif"
+        metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, crs_epsg=4326)
+
+        metadata_timestamp = save_geotiff("estimated_OGM", output_tiff_path_timestamp, ogm_data, ogm_gt_,
+                                          crs_epsg=4326)
+
+        # logger.info(f"{ND_entity_ID}")
+        # logger.info(f"Metadata {metadata}")
+        process_and_upload_ogm(ND_entity_ID, os.path.join("estimated_OGM", output_tiff_path_timestamp),
+                               config.BUCKET_NAME, metadata_timestamp)
+    except Exception as e:
+        logger.error(f"Error saving or uploading OGM: {e}")
+    ######################################################################
 
     # Update OGM with satellite data
     try:
-        observ_sat_data_, observ_sat_gt_, observ_sat_proj = load_image(
+        observ_sat_data_, observ_sat_gt_, observ_sat_proj, data_type = load_image(
             f"downloads/satellite_imgs/{disaster_type}", 3)
-        ogm_data = update_occupancy_grid(ogm_data, ogm_gt_, observ_sat_data_, observ_sat_gt_)
+        observ_sat_data_ = np.asarray(observ_sat_data_)
+        if data_type == 'Flood':
+            ogm_data = update_occupancy_grid_flood(ogm_data,
+                                                   ogm_gt_,
+                                                   observ_sat_data_,
+                                                   observ_sat_gt_)
+        elif data_type == 'burnt_area':
+            ogm_data = update_occupancy_grid_fire(ogm_data,
+                                                  ogm_gt_,
+                                                  observ_sat_data_,
+                                                  observ_sat_gt_,
+                                                  'burnt_area')
         logger.info(f"OGM has successfully generated and fused sate file")
     except FileNotFoundError:
         logger.warning("Satellite ROI directory not found.")
@@ -952,6 +1242,12 @@ def estimate_nd_status():
 
     # Update OGM with hotspot data from the SocialMedia directory
     try:
+        ##################################################################
+        with rasterio.open(ogm_path) as src:
+            ogm_profile = src.profile
+            ogm_data = src.read(1)  # 2D array
+            ogm_transform = src.transform
+        ##################################################################
         social_media_dir = "downloads/SocialMedia"  # Path to the SocialMedia directory
         hotspot_files = [os.path.join(social_media_dir, f) for f in os.listdir(social_media_dir)
                          if f.startswith("hotspot_results") and f.endswith(".geojson")]
@@ -967,6 +1263,7 @@ def estimate_nd_status():
                     try:
                         properties = feature.get("properties", {})
                         geometry = feature.get("geometry", {})
+
                         if geometry.get("type") == "Polygon":
                             # Extract polygon coordinates and calculate grid cells it covers
                             polygon = Polygon(geometry.get("coordinates")[0])
@@ -1014,12 +1311,18 @@ def estimate_nd_status():
 
     # Save updated OGM as GeoTIFF
     try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_tiff_path_timestamp = f"occupancy_grid_map_{disaster_type}_{timestamp}.tif"
+
         output_tiff_path = f"occupancy_grid_map_{disaster_type}.tif"
         metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, crs_epsg=4326)
-        logger.info(f"{ND_entity_ID}")
-        logger.info(f"Metadata {metadata}")
-        process_and_upload_ogm(ND_entity_ID, os.path.join("estimated_OGM", output_tiff_path),
-                               config.BUCKET_NAME, metadata)
+
+        metadata_timestamp = save_geotiff("estimated_OGM", output_tiff_path_timestamp, ogm_data, ogm_gt_, crs_epsg=4326)
+
+        # logger.info(f"{ND_entity_ID}")
+        # logger.info(f"Metadata {metadata}")
+        process_and_upload_ogm(ND_entity_ID, os.path.join("estimated_OGM", output_tiff_path_timestamp),
+                               config.BUCKET_NAME, metadata_timestamp)
     except Exception as e:
         logger.error(f"Error saving or uploading OGM: {e}")
     ###################################################################################################################
@@ -1038,8 +1341,8 @@ def polygon_to_pixels(polygon, geo_transform, grid_shape):
         tuple: Pixel coordinates (x, y) of grid cells covered by the polygon.
     """
     bounds = polygon.bounds
-    x_min, y_min = coordinates_to_pixel(geo_transform, bounds[0], bounds[1])
-    x_max, y_max = coordinates_to_pixel(geo_transform, bounds[2], bounds[3])
+    x_min, y_min = coordinates_to_pixel_update(geo_transform, bounds[0], bounds[1])
+    x_max, y_max = coordinates_to_pixel_update(geo_transform, bounds[2], bounds[3])
 
     x_min, x_max = max(0, x_min), min(grid_shape[1] - 1, x_max)
     y_min, y_max = max(0, y_min), min(grid_shape[0] - 1, y_max)
@@ -1128,438 +1431,305 @@ def haversine_distance(coord1, coord2):
     distance = R * c  # Distance in meters
     return distance
 
+def save_multi_band_geotiff(output_path, data_3d, transform, proj, crs_epsg=4326):
+    height = data_3d.shape[1]
+    width = data_3d.shape[2]
+    band_count = data_3d.shape[0]
+
+    # Use rasterio or gdal
+    import rasterio
+    from rasterio.crs import CRS
+    from rasterio.transform import Affine
+
+    with rasterio.open(
+        output_path,
+        'w',
+        driver='GTiff',
+        height=height,
+        width=width,
+        count=band_count,
+        dtype=data_3d.dtype,
+        crs=CRS.from_epsg(crs_epsg),
+        transform=Affine.from_gdal(*transform),
+    ) as dst:
+        for i in range(band_count):
+            dst.write(data_3d[i, :, :], i+1)
+
+
+
+def associate_features_with_measurements(ogm_features, new_features, distance_threshold):
+    """
+    Use the Hungarian algorithm (linear_sum_assignment) to associate OGM features
+    with new measurements. Only returns matches with distance < distance_threshold.
+    """
+
+    N = len(ogm_features)
+    M = len(new_features)
+    if N == 0 or M == 0:
+        return []
+
+    # Collect (lon, lat) from OGM
+    ogm_coords = []
+    for feat in ogm_features:
+        geom = feat.get("geometry", {})
+        if geom.get("type") == "Point":
+            coords = geom.get("coordinates", [])
+            if len(coords) >= 2:
+                ogm_coords.append((coords[0], coords[1]))
+            else:
+                ogm_coords.append((None, None))
+        else:
+            ogm_coords.append((None, None))
+
+    # Collect (lon, lat) from new measurements
+    new_coords = []
+    for feat in new_features:
+        geom = feat.get("geometry", {})
+        if geom.get("type") == "Point":
+            coords = geom.get("coordinates", [])
+            if len(coords) >= 2:
+                new_coords.append((coords[0], coords[1]))
+            else:
+                new_coords.append((None, None))
+        else:
+            new_coords.append((None, None))
+
+    # Build cost matrix (N x M)
+    cost_matrix = np.zeros((N, M), dtype=np.float64)
+    for i in range(N):
+        lon1, lat1 = ogm_coords[i]
+        for j in range(M):
+            lon2, lat2 = new_coords[j]
+            if None in (lon1, lat1, lon2, lat2):
+                cost_matrix[i, j] = 1e12  # large cost if invalid geometry
+            else:
+                dist = haversine_distance((lon1, lat1), (lon2, lat2))
+                cost_matrix[i, j] = dist
+
+    # Hungarian assignment
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    # Filter out pairs with distance above threshold
+    matches = []
+    for i_ogm, i_new in zip(row_ind, col_ind):
+        if cost_matrix[i_ogm, i_new] <= distance_threshold:
+            matches.append((i_ogm, i_new))
+
+    return matches
+
 
 def estimate_objects_status():
     """
-    Estimate objects' status and process the occupancy grid map using data
-    from drones and social media posts.
+    1) Load existing OGM as GeoJSON.
+    2) Integrate Drone data (with Hungarian data association).
+    3) Apply a Kalman Filter to refine positions.
+    4) Integrate Social Media data (SinglePostResult) as GeoJSON (also via association).
+    5) Save final OGM (overwrite + timestamped, filtering label == -1 only from the timestamped).
+    6) Prepare metadata and upload the final result.
     """
-    global polygon_coordinates
-    # polygon_coordinates = convert_to_polygon()
-    disaster_type = global_cache.get('natural_disaster', 'No disaster info')
-    ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
+    # (1) Load OGM
+    disaster_type = global_cache.get("natural_disaster", "NoDisaster")
+    if disaster_type == "NoDisaster":
+        logger.info("No valid disaster type. Aborting object status estimation.")
+        return
 
-    if disaster_type != 'No disaster info':
-        ogm_metadata = get_geo_dict(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tiff")
-        if not ogm_metadata:
-            logger.error("Failed to load or generate OGM metadata. Aborting process.")
-            return
+    ogm_metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
+    if not os.path.exists(ogm_metadata_path):
+        logger.info(f"OGM not found at {ogm_metadata_path}. Aborting.")
+        return
 
-        #######################################################################################
-        # Integrate Drone data
-        #######################################################################################
-        try:
-            observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images")
-            logger.info(f"Observation Metadata Type: {type(observ_metadata)}")
-            if observ_metadata:
-                ##########################################################
-                if observ_metadata:
-                    # 'observ_metadata' should be a dict with "type" and "features" keys
-                    features_list = observ_metadata.get("features", [])
-                    ogm_list = ogm_metadata.get("features", [])
-                    logger.info("Number of drone features: %d", len(features_list))
-                    # Loop over your OGM metadata
-                    for n in ogm_list:
-                        for feat in features_list:
-                            # Extract the geometry (coordinates) and properties
-                            z_cords = feat.get("geometry", {}).get("coordinates", [])
-                            ogm_cords = n.get("geometry", {}).get("coordinates", [])
-                            props = feat.get("properties", {})
+    with open(ogm_metadata_path, "r") as f:
+        ogm_metadata = json.load(f)
+    ogm_features = ogm_metadata.get("features", [])
+    logger.info(f"Loaded OGM with {len(ogm_features)} features.")
 
-                            if not z_cords or len(z_cords) < 2:
-                                continue  # Skip if no valid coordinate set
 
-                            # Perform distance check (assuming n['coordinates'] is [lon, lat, (elev)])
-                            distance_th = haversine_distance(ogm_cords, z_cords)
-                            if distance_th < 5:
-                                # Update your OGM metadata with the drone's score/label
-                                n["properties"]["score"] = props.get("score", 0.0)
-                                n["properties"]['label'] = props.get("label", -1)
 
-                                # If both have an elevation coordinate, update
-                                if len(ogm_cords) > 2 and len(z_cords) > 2:
-                                    ogm_cords[-1] = z_cords[-1]  # Transfer elev
+    # (2) Integrate Drone Data (Association + update)
+    observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images")
+    if observ_metadata and isinstance(observ_metadata, dict):
+        drone_features = observ_metadata.get("features", [])
+        logger.info(f"Observ metadata => {len(drone_features)} new Drone features found.")
+        distance_threshold = (int(config.OGM_RESOLUTION)  // 2)
+        matches = associate_features_with_measurements(
+            ogm_features,
+            drone_features,
+            distance_threshold
+        )
+        logger.info(f"Hungarian matching => {len(matches)} associations (within {distance_threshold}m).")
 
-                # Write updated metadata to JSON
-                with open(f'estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json', 'w') as file:
-                    json.dump(ogm_metadata, file, indent=4)
-                logger.info("Correctly updating the OGM with measurements")
-                ##########################################################
-                logger.info(f"Updated OGM Metadata Type: {type(ogm_metadata)}")
-                if ogm_metadata:
-                    logger.info(f"First Entry of Updated OGM Metadata: {ogm_metadata[0]}")
-            else:
-                logger.info("Drone metadata is empty or not available.")
-        except Exception as e:
-            logger.info(f"Object measurements are not available. Exception: {e}")
+        for (i_ogm, i_drone) in matches:
+            ogm_feat = ogm_features[i_ogm]
+            drone_feat = drone_features[i_drone]
+            ogm_props = ogm_feat.setdefault("properties", {})
+            df_props = drone_feat.get("properties", {})
+            ogm_props["label"] = df_props.get("label", -1)
+            ogm_props["score"] = df_props.get("score", 0.0)
 
-        try:
-            state_dim = 3
-            measurement_dim = 3
-            kf = KalmanFilter(state_dim, measurement_dim)
-            ogm_list = ogm_metadata.get("features", [])
-            for entry in ogm_list:
-                try:
-                    label = entry.get("properties", {}).get("label")
-                    if label == -1:
-                        continue
-                    cords = entry.get("geometry", {}).get("coordinates", [])
-                    if not isinstance(cords, list) or len(cords) != 3:
-                        continue
+        # Overwrite + timestamped
+        with open(ogm_metadata_path, "w") as file:
+            json.dump(ogm_metadata, file, indent=4)
 
-                    z = np.array(cords).reshape((measurement_dim, 1))
-                    kf.predict()
-                    kf.update(z)
+        logger.info("Drone data integrated (with data association).")
+    else:
+        logger.info("Drone metadata is empty or unavailable.")
 
-                    updated_position = kf.x.flatten().tolist()
-                    entry["geometry"]["coordinates"] = updated_position
-                except Exception as e:
-                    logger.error(f"Error updating Kalman filter for entry {entry}: {e}")
-            logger.info(f"Kalman filter applied successfully")
-        except Exception as e:
-            logger.info(f"Object measurements are not available. Exception: {e}")
+    # (3) Apply Kalman Filter
+    for feat in ogm_features:
+        props = feat.get("properties", {})
+        label = props.get("label", -1)
+        if label == -1:
+            continue  # skip unlabeled
+        geom = feat.get("geometry", {})
+        if geom.get("type") != "Point":
+            continue
+        coords = geom.get("coordinates", [])
+        if len(coords) < 2:
+            continue
 
-        #######################################################################################
-        # Save updated metadata to JSON
-        #######################################################################################
-        try:
-            metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
-            if not isinstance(ogm_metadata, list):
-                raise ValueError("ogm_metadata is not a list.")
-            ####################################################################
-            with open(metadata_path, 'w') as f:
-                json.dump(ogm_metadata, f, indent=4)
-            logger.info(f"OGM metadata successfully saved to {metadata_path}")
-            ####################################################################
-        except ValueError as e:
-            logger.error(f"Validation error for OGM metadata: {e}")
-        except Exception as e:
-            logger.error(f"Failed to save OGM metadata: {e}")
-        #######################################################################################
-        # Convert (Updated) GeoJSON to GeoTIFF
-        #######################################################################################
-        try:
-            geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
-            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects.tif"
+        lon, lat = coords[:2]
+        z_val = coords[2] if len(coords) > 2 else 0.0
+        z = np.array([lon, lat, z_val]).reshape((3, 1))
 
-            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
-            json_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
+        # Minimal KF usage
+        kf = KalmanFilter(state_dim=3, measurement_dim=3)
+        kf.predict()
+        kf.update(z)
+        updated_pos = kf.x.flatten().tolist()
+        feat["geometry"]["coordinates"] = updated_pos
 
-            if not os.path.exists(json_path):
-                raise FileNotFoundError(f"GeoJSON file not found: {json_path}")
+    # Overwrite + timestamp after KF
+    with open(ogm_metadata_path, "w") as f:
+        json.dump(ogm_metadata, f, indent=4)
 
-            with open(f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json", 'r') as f:
-                geojson_data = json.load(f)
+    # -- Only filter label == -1 in the timestamped copy, not in the main one
+    filtered_metadata = copy.deepcopy(ogm_metadata)
+    original_count = len(filtered_metadata["features"])
+    filtered_metadata["features"] = [
+        ff for ff in filtered_metadata["features"]
+        if ff.get("properties", {}).get("label", -1) != -1
+    ]
+    new_count = len(filtered_metadata["features"])
+    logger.info(f"KF step => filtered out label == -1 for timestamped version: "
+                f"old count={original_count}, new count={new_count}.")
 
-            if not geojson_data:
-                raise ValueError("GeoJSON file is empty or invalid. Cannot generate raster.")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ogm_metadata_path_timestamp = f"occupancy_grid_map_{disaster_type}_Objects_{ts}.json"
 
-            # Calculate raster size and validate pixel sizes
-            bbox = get_geojson_bbox(json_path)  # Function to compute bounding box
-            logger.info(f"GeoJSON bounding box: {bbox}")
+    with open(os.path.join("estimated_OGM", ogm_metadata_path_timestamp), "w") as f:
+        json.dump(filtered_metadata, f, indent=4)
 
-            if not bbox or any(k not in bbox for k in ["min_lon", "max_lon", "min_lat", "max_lat"]):
-                raise ValueError(f"Invalid or incomplete bounding box: {bbox}")
+    logger.info("Kalman filter applied to OGM.")
+    ##################################################################################
+    # Save and Upload
+    ##################################################################################
+    final_ogm_path = ogm_metadata_path_timestamp
+    natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
+    metadata = {
+        'title': 'Probability-Based Occupancy Grid Map',
+        'author': 'GRVC lab, University of Seville',
+        'description': f"Estimated occupancy grid map for the {natural_disaster} scenario, used to track detected persons and vehicles.",
+        'creationDate': datetime.now().isoformat(),
+        "XMin": '0',
+        "XRes": '0',
+        "YMax": '0',
+        "YRes": '0',
+        "spatialReference": "EPSG:4326",
+        "file_name": final_ogm_path,
+        "coordinates": global_cache.get('roi', [None]),
+        "bucket": "use",
+        "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/{final_ogm_path}'
+    }
+    output_local_path = os.path.join("estimated_OGM", final_ogm_path)
 
-            # Approx meters per degree
-            meters_per_degree = 111320
-            pixel_size_lat = 10 / meters_per_degree
-            pixel_size_lon = 10 / (
-                    meters_per_degree * np.cos(np.radians((bbox["min_lat"] + bbox["max_lat"]) / 2))
+    logger.info(f"Uploading final OGM to cloud bucket: {config.BUCKET_NAME}")
+    process_and_upload_ogm(obj_entity_ID, output_local_path, config.BUCKET_NAME, metadata)
+    logger.info(f"OGM successfully processed and uploaded with processed drone image: {output_local_path}")
+    ##################################################################################
+    # (4) Integrate Social Media SinglePostResult (Association + update)
+    social_media_dir = "downloads/SocialMedia"
+    if not os.path.isdir(social_media_dir):
+        logger.info("No SocialMedia directory found. Skipping.")
+    else:
+        single_post_files = [
+            f for f in os.listdir(social_media_dir)
+            if f.startswith("single_posts_results") and f.endswith(".geojson")
+        ]
+        single_post_files.sort()  # process in chronological order
+
+        for sm_file in single_post_files:
+            sm_path = os.path.join(social_media_dir, sm_file)
+            with open(sm_path, "r") as f:
+                sm_data = json.load(f)
+            sm_features = sm_data.get("features", [])
+
+            # Data association
+            matches = associate_features_with_measurements(
+                ogm_features, sm_features, distance_threshold=(int(config.OGM_RESOLUTION)  // 2)
             )
-            raster_width = int((bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon)
-            raster_height = int((bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat)
+            logger.info(f"Social Media matching => {len(matches)} associations (within 5m).")
 
-            if raster_width <= 0 or raster_height <= 0:
-                raise ValueError("Raster dimensions must be greater than zero.")
+            for (i_ogm, i_sm) in matches:
+                ogm_feat = ogm_features[i_ogm]
+                sm_feat = sm_features[i_sm]
+                ogm_props = ogm_feat.setdefault("properties", {})
+                sm_props = sm_feat.get("properties", {})
 
-            # Convert GeoJSON to GeoTIFF
-            try:
-                geojson_to_multi_band_geotiff(
-                    json_path,
-                    geotiff_path,
-                    pixel_size_lat=pixel_size_lat,
-                    pixel_size_lon=pixel_size_lon
-                )
-            except Exception as e:
-                print(f"Error due to {e}")
+                existing_score = ogm_props.get("score", 0.0)
+                new_prob = sm_props.get("prob", 0.5)
+                fused_score = fuse_fire_probability(existing_score, new_prob, weight=0.5)
+                ogm_props["score"] = fused_score
+                ogm_props["label"] = sm_props.get("label", -1)
 
+            # Remove file after processing
+            os.remove(sm_path)
+            logger.info(f"Processed and removed {sm_path}")
 
-            # Load the GeoTIFF data
-            logger.info(f"Loading GeoTIFF data from {geotiff_path}")
-            ogm_data, ogm_gt_, ogm_proj = load_image(geotiff_path, 0)
+        # Overwrite + timestamp after SocialMedia integration
+        with open(ogm_metadata_path, "w") as f:
+            json.dump(ogm_metadata, f, indent=4)
 
-            # Save the GeoTIFF to the output path
-            logger.info(f"Saving GeoTIFF to {output_tiff_path}")
-            metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, crs_epsg=4326)
+        # Filter out -1 in the timestamped copy
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ogm_metadata_path_timestamp = f"occupancy_grid_map_{disaster_type}_Objects_{ts}.json"
+        filtered_metadata = copy.deepcopy(ogm_metadata)
+        original_count = len(filtered_metadata["features"])
+        filtered_metadata["features"] = [
+            ff for ff in filtered_metadata["features"]
+            if ff.get("properties", {}).get("label", -1) != -1
+        ]
+        new_count = len(filtered_metadata["features"])
+        logger.info(f"Social Media => filtered out label == -1 for timestamped version: "
+                    f"old count={original_count}, new count={new_count}.")
 
-            # Upload the GeoTIFF to the cloud bucket
-            logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
-            process_and_upload_ogm(obj_entity_ID, output_tiff_path, config.BUCKET_NAME, metadata)
+        with open(os.path.join("estimated_OGM", ogm_metadata_path_timestamp), "w") as f:
+            json.dump(filtered_metadata, f, indent=4)
 
-            logger.info(f"OGM successfully processed and uploaded: {geotiff_path}")
+        logger.info("Social Media data integrated into OGM.")
 
-        except FileNotFoundError as e:
-            logger.error(f"File not found during GeoTIFF conversion: {e}")
-        except PermissionError as e:
-            logger.error(f"Permission error during GeoTIFF conversion: {e}")
-        except ValueError as e:
-            logger.error(f"Value error during GeoTIFF conversion: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error during GeoTIFF conversion: {e}")
+    # (5) Prepare metadata for upload
+    final_ogm_path = ogm_metadata_path_timestamp
+    natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
+    metadata = {
+        'title': 'Probability-Based Occupancy Grid Map',
+        'author': 'GRVC lab, University of Seville',
+        'description': f"Estimated occupancy grid map for the {natural_disaster} scenario, used to track detected persons and vehicles.",
+        'creationDate': datetime.now().isoformat(),
+        "XMin": '0',
+        "XRes": '0',
+        "YMax": '0',
+        "YRes": '0',
+        "spatialReference": "EPSG:4326",
+        "file_name": final_ogm_path,
+        "coordinates": global_cache.get('roi', [None]),
+        "bucket": "use",
+        "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/{final_ogm_path}'
+    }
+    output_local_path = os.path.join("estimated_OGM", final_ogm_path)
 
-        #######################################################################################
-        # Integrate SinglePostResult data with Kalman filter
-        #######################################################################################
-        try:
-            # Load OGM data
-            ogm_data, ogm_gt_, ogm_proj = load_image(ogm_path, 0)
-            social_media_dir = "downloads/SocialMedia"  # Directory containing SinglePostResult files
-
-            # Gather SinglePostResult files
-            single_post_files = [os.path.join(social_media_dir, f) for f in os.listdir(social_media_dir)
-                                 if f.startswith("single_posts_results") and f.endswith(".geojson")]
-
-            if not single_post_files:
-                logger.info("No SinglePostResult files found. Skipping this step.")
-                return
-
-            # Process files in chronological order
-            single_post_files.sort()  # Process files in chronological order
-            logger.info(f"Found {len(single_post_files)} SinglePostResult files.")
-
-            # Initialize the Kalman filter
-            state_dim = 2  # For position (x, y, z)
-            measurement_dim = 2  # For measurements (x, y, z)
-            kf = KalmanFilter(state_dim, measurement_dim)
-
-            # Function to check if coordinates are within OGM bounds and FOV
-            def is_within_fov_ogm(gt, lon, lat):
-                try:
-                    x, y = coordinates_to_pixel(gt, lon, lat)
-                    return 0 <= x < ogm_data.shape[1] and 0 <= y < ogm_data.shape[0]
-                except Exception as e:
-                    logger.warning(f"FOV check failed for coordinates ({lon}, {lat}): {e}")
-                    return False
-
-            # Process each SinglePostResult file
-            for single_post_file in single_post_files:
-                try:
-                    with open(single_post_file, 'r') as f:
-                        single_post_data = json.load(f)
-                    logger.info(f"Processing SinglePostResult file: {single_post_file}")
-
-                    for feature in single_post_data.get("features", []):
-                        properties = feature.get("properties", {})
-                        geometry = feature.get("geometry", {})
-
-                        if geometry.get("type") == "Point":
-                            coordinates = geometry.get("coordinates", [])
-                            if len(coordinates) == 2:  # Ensure valid geographic coordinates
-                                lon, lat = coordinates
-                                # logger.debug(f"Mapping post coordinates: {lon}, {lat}")
-
-                                # Check if the observation is within the FOV of the OGM
-                                if not is_within_fov_ogm(ogm_gt_, lon, lat):
-                                    # logger.info(f"Coordinates ({lon}, {lat}) are outside the FOV. Skipping.")
-                                    continue
-
-                                # Construct the observation (x, y, z)
-                                z = np.array([lon, lat, 0]).reshape((3, 1))  # Assuming no altitude
-
-                                # Kalman filter prediction and update
-                                try:
-                                    kf.predict()
-                                    kf.update(z)
-
-                                    # Get the refined position
-                                    refined_position = kf.x.flatten().tolist()
-
-                                    # Map the refined position to the closest metadata entry
-                                    try:
-                                        # Find the closest metadata entry
-                                        closest_entry = None
-                                        min_distance = float('inf')
-
-                                        for entry in ogm_metadata:
-                                            geo_coords = entry.get("geo_coords")
-                                            if not geo_coords or len(geo_coords) != 3:
-                                                continue
-
-                                            distance = np.sqrt(
-                                                (geo_coords[0] - refined_position[0]) ** 2 +
-                                                (geo_coords[1] - refined_position[1]) ** 2
-                                            )
-
-                                            if distance < min_distance:
-                                                min_distance = distance
-                                                closest_entry = entry
-
-                                        # Update the closest entry with the refined position
-                                        if closest_entry and min_distance < 0.0005:  # Define tolerance
-                                            closest_entry["coordinates"] = refined_position
-                                            logger.info(
-                                                f"Updated metadata entry with refined position: {refined_position}")
-                                        else:
-                                            logger.warning(
-                                                f"No close metadata entry found for refined position: {refined_position}")
-
-                                    except Exception as e:
-                                        logger.warning(
-                                            f"Error mapping refined coordinates ({refined_position}) to metadata: {e}")
-                                except Exception as e:
-                                    logger.warning(f"Kalman filter update failed for coordinates ({lon}, {lat}): {e}")
-
-                    # Delete the file after successful processing
-                    os.remove(single_post_file)
-                    logger.info(f"Successfully processed and deleted: {single_post_file}")
-
-                except Exception as e:
-                    logger.error(f"Error processing {single_post_file}: {e}")
-        except Exception as e:
-            logger.error(f"Error integrating SinglePostResult data with Kalman filter: {e}")
-
-        #######################################################################################
-        # Save updated metadata to JSON
-        #######################################################################################
-        try:
-            metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
-            # Validate ogm_metadata before saving
-            if not isinstance(ogm_metadata, list):
-                raise ValueError("ogm_metadata is not a list.")
-
-            with open(metadata_path, 'w') as f:
-                json.dump(ogm_metadata, f, indent=4)
-            logger.info(f"OGM metadata successfully saved to {metadata_path}")
-
-        except ValueError as e:
-            logger.error(f"Validation error for OGM metadata: {e}")
-        except Exception as e:
-            logger.error(f"Failed to save OGM metadata: {e}")
-
-        # geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects_filtered.json"
-        #
-        # # Generate and Save GeoJSON
-        # try:
-        #     geojson = {"type": "FeatureCollection", "features": []}
-        #
-        #     # Iterate through OGM metadata to create GeoJSON features
-        #     for entry in ogm_metadata:
-        #         # Validate each entry
-        #         geo_coords = entry.get("geo_coords", [])
-        #         if not (isinstance(geo_coords, list) and len(geo_coords) == 3):
-        #             # logger.warning(f"Skipping invalid geo_coords in entry: {entry}")
-        #             continue
-        #
-        #         score = entry.get("score", 0.0)
-        #         label = entry.get("label", -1)
-        #
-        #         if label == -1:
-        #             # logger.info(f"Skipping entry with label -1: {entry}")
-        #             continue
-        #
-        #         # Construct the GeoJSON feature
-        #         feature = {
-        #             "type": "Feature",
-        #             "geometry": {
-        #                 "type": "Point",
-        #                 "coordinates": [geo_coords[0], geo_coords[1], geo_coords[2]]  # Use lon, lat, elev
-        #             },
-        #             "properties": {
-        #                 "score": score,
-        #                 "label": label
-        #             }
-        #         }
-        #         geojson["features"].append(feature)
-        #
-        #     # Save the GeoJSON
-        #     with open(geojson_path, 'w') as f:
-        #         json.dump(geojson, f, indent=4)
-        #     logger.info(f"Filtered GeoJSON successfully saved to {geojson_path}")
-        #
-        # except ValueError as e:
-        #     logger.error(f"Validation error while creating GeoJSON: {e}")
-        # except PermissionError as e:
-        #     logger.error(f"Permission denied when saving filtered GeoJSON to {geojson_path}: {e}")
-        # except FileNotFoundError as e:
-        #     logger.error(f"Directory not found for saving filtered GeoJSON to {geojson_path}: {e}")
-        # except IOError as e:
-        #     logger.error(f"I/O error occurred while saving filtered GeoJSON to {geojson_path}: {e}")
-        # except Exception as e:
-        #     logger.error(f"Unexpected error while saving filtered GeoJSON: {e}")
-
-        #######################################################################################
-        # Convert Geo Json to Geo Tiff
-        #######################################################################################
-        try:
-            geotiff_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.tif"
-            output_tiff_path = f"occupancy_grid_map_{disaster_type}_Objects.tif"
-
-            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
-            geojson_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
-            # Validate the GeoJSON file
-            if not os.path.exists(geojson_path):
-                raise FileNotFoundError(f"GeoJSON file not found: {geojson_path}")
-
-            with open(geojson_path, 'r') as f:
-                geojson_data = json.load(f)
-
-            if not geojson_data.get("features", []):
-                raise ValueError("GeoJSON file contains no features. Cannot generate raster.")
-
-            # Calculate raster size and validate pixel sizes
-            bbox = get_geojson_bbox(geojson_path)  # Function to compute bounding box
-            logger.info(f"GeoJSON bounding box: {bbox}")
-
-            if not bbox or any(k not in bbox for k in ["min_lon", "max_lon", "min_lat", "max_lat"]):
-                raise ValueError(f"Invalid or incomplete bounding box: {bbox}")
-
-            # Calculate pixel size in degrees based on the desired resolution (10 meters per pixel)
-            meters_per_degree = 111320  # Approximate value at the equator
-            pixel_size_lat = 10 / meters_per_degree  # Latitude pixel size in degrees
-            pixel_size_lon = 10 / (meters_per_degree * np.cos(np.radians((bbox["min_lat"] + bbox["max_lat"]) / 2)))
-            logger.info(f"Pixel size (degrees): Lat = {pixel_size_lat}, Lon = {pixel_size_lon}")
-
-            # Calculate raster dimensions
-            raster_width = int((bbox["max_lon"] - bbox["min_lon"]) / pixel_size_lon)
-            raster_height = int((bbox["max_lat"] - bbox["min_lat"]) / pixel_size_lat)
-
-            logger.info(f"Calculated raster size: {raster_width}x{raster_height}")
-            if raster_width <= 0 or raster_height <= 0:
-                raise ValueError("Raster dimensions must be greater than zero. Check pixel sizes or bounding box.")
-
-            # Convert GeoJSON to GeoTIFF
-            logger.info(f"Converting GeoJSON to GeoTIFF at {geotiff_path}")
-            geojson_to_multi_band_geotiff(
-                geojson_path,
-                geotiff_path,
-                pixel_size_lat=pixel_size_lat,
-                pixel_size_lon=pixel_size_lon
-            )
-
-            # Load the GeoTIFF data
-            logger.info(f"Loading GeoTIFF data from {geotiff_path}")
-            ogm_data, ogm_gt_, ogm_proj = load_image(geotiff_path, 0)
-
-            # Save the GeoTIFF to the output path
-            logger.info(f"Saving GeoTIFF to {output_tiff_path}")
-            metadata = save_geotiff("estimated_OGM", output_tiff_path, ogm_data, ogm_gt_, crs_epsg=4326)
-
-            # Upload the GeoTIFF to the cloud bucket
-            logger.info(f"Uploading GeoTIFF to cloud bucket: {config.BUCKET_NAME}")
-            process_and_upload_ogm(obj_entity_ID, output_tiff_path, config.BUCKET_NAME, metadata)
-
-            logger.info(f"OGM successfully processed and uploaded: {geotiff_path}")
-
-        except FileNotFoundError as e:
-            logger.error(f"File not found during GeoTIFF conversion: {e}")
-        except PermissionError as e:
-            logger.error(f"Permission error during GeoTIFF conversion: {e}")
-        except ValueError as e:
-            logger.error(f"Value error during GeoTIFF conversion: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error during GeoTIFF conversion: {e}")
-
+    logger.info(f"Uploading final OGM to cloud bucket: {config.BUCKET_NAME}")
+    process_and_upload_ogm(obj_entity_ID, output_local_path, config.BUCKET_NAME, metadata)
+    logger.info(f"OGM successfully processed and uploaded for GeoSocial Media: {output_local_path}")
 
 def get_geojson_bbox(geojson_path):
     """
@@ -1740,18 +1910,38 @@ def load_raster(filename):
         logger.info(f"Raster was not loaded due to {e}")
 
 
-def get_roi(new_polygon_coords, existing_map_path, resolution, crs_epsg=4326):
+def get_roi(
+        new_polygon_coords,
+        existing_map_path,
+        resolution,
+        crs_epsg,
+        band_count,
+        dem_path=None  # DEM file path; used only for one-band TIFF
+):
     """
     Create a GeoTIFF based on polygon coordinates with a specified resolution.
 
+    For band_count==1:
+      - Creates an occupancy grid map (OGM) where each pixel is initialized to 0.5.
+      - Additionally, it samples the DEM at the polygon vertices and inserts this
+        information (as [lon, lat, elevation]) into the metadata under "georef_data".
+
+    For band_count==2:
+      - Creates an OGM with two bands:
+          Band 1 (label): default -1
+          Band 2 (score): default 0.0
+      - No elevation data is inserted in the metadata.
+
     Args:
-        new_polygon_coords (list): Polygon coordinates.
+        new_polygon_coords (list): Polygon coordinates [(lon, lat), ...].
         existing_map_path (str): Path for saving the GeoTIFF.
-        resolution (float): Resolution (in meters or degrees per pixel).
-        crs_epsg (int): EPSG code for CRS.
+        resolution (float): Desired resolution in meters per pixel (converted to degrees if EPSG:4326).
+        crs_epsg (int): EPSG code for CRS (default 4326).
+        band_count (int): Number of bands. 1 or 2.
+        dem_path (str): File path to the DEM GeoTIFF (only used for one-band TIFF).
 
     Returns:
-        data_set: GDAL dataset, or None if an error occurs.
+        data_set (gdal.Dataset): GDAL dataset, or None if an error occurs.
     """
     try:
         if resolution <= 0:
@@ -1761,40 +1951,164 @@ def get_roi(new_polygon_coords, existing_map_path, resolution, crs_epsg=4326):
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
             if not polygon.is_valid:
-                raise ValueError("Polygon is invalid.")
+                raise ValueError("Polygon is invalid and could not be fixed.")
 
         minx, miny, maxx, maxy = polygon.bounds
 
-        logger.debug(f"Polygon bounds: minx={minx}, maxx={maxx}, miny={miny}, maxy={maxy}")
-
+        # Handle coordinate conversions if we're in EPSG:4326 (geographic)
         if crs_epsg == 4326:
-            width = max(1, int((maxx - minx) / (resolution / 111320)))  # Convert meters to degrees
-            height = max(1, int((maxy - miny) / (resolution / 111320)))
+            center_lat = (miny + maxy) / 2
+            meters_per_degree_lat = 111320.0
+            meters_per_degree_lon = 111320.0 * math.cos(math.radians(center_lat))
+
+            lat_res_deg = resolution / meters_per_degree_lat
+            lon_res_deg = resolution / meters_per_degree_lon
+
+            width = max(1, int((maxx - minx) / lon_res_deg))
+            height = max(1, int((maxy - miny) / lat_res_deg))
         else:
+            # For projected CRS (in meters)
             width = max(1, int((maxx - minx) / resolution))
             height = max(1, int((maxy - miny) / resolution))
 
         transform_ = from_bounds(minx, miny, maxx, maxy, width, height)
 
-        occupancy_grid_data = np.ones((height, width), dtype=np.uint8) * 0.5
+        # Prepare the output data arrays
+        if band_count == 1:
+            data_arrays = [np.full((height, width), 0.5, dtype=np.float32)]
+        elif band_count == 2:
+            label_band = np.full((height, width), -1, dtype=np.float32)
+            score_band = np.zeros((height, width), dtype=np.float32)
+            data_arrays = [label_band, score_band]
+        else:
+            raise ValueError(f"Unsupported band_count={band_count}. Only 1 or 2 are allowed.")
+
+        # Write the new GeoTIFF
         with rasterio.open(
                 existing_map_path,
                 'w',
                 driver='GTiff',
                 height=height,
                 width=width,
-                count=1,
-                dtype=occupancy_grid_data.dtype,
+                count=band_count,
+                dtype=np.float32,
                 crs=CRS.from_epsg(crs_epsg),
                 transform=transform_,
         ) as dst:
-            dst.write(occupancy_grid_data, 1)
+            for i, band_data in enumerate(data_arrays, start=1):
+                dst.write(band_data, i)
+
+            # If one-band TIFF and a DEM is provided, sample elevation at each polygon vertex
+            if band_count == 1 and dem_path is not None:
+                polygon_with_elev = []
+                with rasterio.open(dem_path) as dem_src:
+                    # For each (lon, lat) vertex, sample the DEM for elevation.
+                    for lon, lat in new_polygon_coords:
+                        # Sample returns a generator; get the first value from the first band
+                        sample = list(dem_src.sample([(lon, lat)]))
+                        elev_value = sample[0][0] if sample and sample[0].size > 0 else None
+                        polygon_with_elev.append([lon, lat, elev_value])
+                # Update the TIFF metadata with the polygon coordinates including elevation.
+                dst.update_tags(georef_data=json.dumps(polygon_with_elev))
+
+        # Open the file with GDAL and return the dataset
         return gdal.Open(existing_map_path, gdal.GA_ReadOnly)
 
     except Exception as e:
         logger.error(f"Error in get_roi: {e}")
         return None
 
+
+
+# def get_roi(
+#     new_polygon_coords,
+#     existing_map_path,
+#     resolution,
+#     crs_epsg,
+#     band_count
+# ):
+#     """
+#     Create a GeoTIFF based on polygon coordinates with a specified resolution.
+#
+#     If band_count=1, we create an OGM with each pixel = 0.5.
+#     If band_count=2, we create an OGM with:
+#       - Band 1 (label): default -1
+#       - Band 2 (score): default 0.0
+#
+#     Args:
+#         new_polygon_coords (list): Polygon coordinates [(lon, lat), ...].
+#         existing_map_path (str): Path for saving the GeoTIFF.
+#         resolution (float): Desired resolution in meters per pixel (converted to degrees if EPSG:4326).
+#         crs_epsg (int): EPSG code for CRS (default 4326).
+#         band_count (int): Number of bands. 1 or 2.
+#
+#     Returns:
+#         data_set (gdal.Dataset): GDAL dataset, or None if an error occurs.
+#     """
+#     try:
+#         if resolution <= 0:
+#             raise ValueError("Resolution must be a positive value.")
+#
+#         polygon = Polygon(new_polygon_coords)
+#         if not polygon.is_valid:
+#             polygon = polygon.buffer(0)
+#             if not polygon.is_valid:
+#                 raise ValueError("Polygon is invalid and could not be fixed.")
+#
+#         minx, miny, maxx, maxy = polygon.bounds
+#
+#         # Handle coordinate conversions if we're in EPSG:4326
+#         if crs_epsg == 4326:
+#             center_lat = (miny + maxy) / 2
+#             meters_per_degree_lat = 111320.0
+#             meters_per_degree_lon = 111320.0 * math.cos(math.radians(center_lat))
+#
+#             lat_res_deg = resolution / meters_per_degree_lat
+#             lon_res_deg = resolution / meters_per_degree_lon
+#
+#             width = max(1, int((maxx - minx) / lon_res_deg))
+#             height = max(1, int((maxy - miny) / lat_res_deg))
+#         else:
+#             # If using a projected coordinate system (in meters)
+#             width = max(1, int((maxx - minx) / resolution))
+#             height = max(1, int((maxy - miny) / resolution))
+#
+#         transform_ = from_bounds(minx, miny, maxx, maxy, width, height)
+#
+#         # Create bands based on band_count
+#         if band_count == 1:
+#             data_arrays = [
+#                 np.full((height, width), 0.5, dtype=np.float32)
+#             ]
+#         elif band_count == 2:
+#             # Two-band OGM:
+#             #   Band 1 (labels): default -1
+#             #   Band 2 (scores): default 0.0
+#             label_band = np.full((height, width), -1, dtype=np.float32)
+#             score_band = np.zeros((height, width), dtype=np.float32)
+#             data_arrays = [label_band, score_band]
+#         else:
+#             raise ValueError(f"Unsupported band_count={band_count}. Only 1 or 2 are allowed.")
+#
+#         with rasterio.open(
+#             existing_map_path,
+#             'w',
+#             driver='GTiff',
+#             height=height,
+#             width=width,
+#             count=band_count,
+#             dtype=np.float32,
+#             crs=CRS.from_epsg(crs_epsg),
+#             transform=transform_,
+#         ) as dst:
+#             for i, band_data in enumerate(data_arrays, start=1):
+#                 dst.write(band_data, i)
+#
+#         return gdal.Open(existing_map_path, gdal.GA_ReadOnly)
+#
+#     except Exception as e:
+#         logger.error(f"Error in get_roi: {e}")
+#         return None
 
 def mask_geotiff_with_polygon_exact(geotiff_path, polygon_coords, output_path):
     """
@@ -1885,7 +2199,7 @@ def convert_to_polygon(return_bounding_box=True):
         if roi_polygon[0] != roi_polygon[-1]:
             raise ValueError("ROI polygon is not closed. The first and last coordinates must match.")
 
-        logger.info(f"Retrieved ROI polygon: {roi_polygon}")
+        # logger.info(f"Retrieved ROI polygon: {roi_polygon}")
 
         if not return_bounding_box:
             return roi_polygon  # Return the original polygon if requested
@@ -2065,7 +2379,7 @@ def create_entity(entity_ID, entity_type_):
         },
         "bucket": {
             "type": "Property",
-            "value": "naples"
+            "value": "use"
         },
         "@context": [
             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"
@@ -2278,15 +2592,15 @@ def generate_geo_dict_from_tiff(tiff_path):
             # Handle NoData values (if any)
             nodata_value = dataset.nodata
             if nodata_value is not None:
-                mask = elevation_data != nodata_value
+                mask_ = elevation_data != nodata_value
             else:
-                mask = np.ones_like(elevation_data, dtype=bool)
+                mask_ = np.ones_like(elevation_data, dtype=bool)
 
             # Initialize a transformer for coordinate conversion
             transformer = Transformer.from_crs(dataset_crs, "EPSG:4326", always_xy=True)
 
             # Get pixel indices
-            rows, cols = np.where(mask)
+            rows, cols = np.where(mask_)
             xs, ys = dataset.xy(rows, cols)
             lons, lats = transformer.transform(xs, ys)
 
@@ -2313,7 +2627,6 @@ def generate_geo_dict_from_tiff(tiff_path):
         logger.error(f"Unexpected error in {tiff_path}: {e}")
 
     return None
-
 
 # To either load or generate the geo dict
 def get_geo_dict(tiff_path):
@@ -2410,54 +2723,145 @@ def load_image(image_path, mode):
     """
     Load the image and return its pixel values, geo-transform, and CRS
     """
-    data, geo_transform, spatial_ref = None, None, None
-    print(f"Loading image from {image_path} with mode {mode}")
+    ##############################################################################
+    data, geo_transform, spatial_ref, measurement_type = None, [None], None, None
+    ##############################################################################
+    # logger.info(f"Loading image from {image_path} with mode {mode}")
 
     def process_observation(observation_file):
-        nonlocal data, geo_transform, spatial_ref
+        nonlocal data, geo_transform, spatial_ref, measurement_type
         logger.info(f"Processing observation: {observation_file}")
-        dataset__ = gdal.Open(observation_file, gdal.GA_ReadOnly)
-        if dataset__ is None:
-            raise FileNotFoundError(f"Could not open file {observation_file}")
-        band__ = dataset__.GetRasterBand(1)
-        data = band__.ReadAsArray()
-        geo_transform = dataset__.GetGeoTransform()
-        spatial_ref = dataset__.GetProjection()
+        # Open the dataset with rasterio using a context manager.
+        with rasterio.open(observation_file) as src:
+            # Read the first band of data.
+            data = src.read(1)
+            # Get the geo-transform (affine transform in rasterio)
+            geo_transform = src.transform
+            geo_transform = geo_transform.to_gdal()
+            # Get the spatial reference (CRS)
+            spatial_ref = src.crs
         return
 
     if mode == 0:  # Load previous OGM
-        # Open the GeoTIFF file
-        dataset_ = gdal.Open(image_path, gdal.GA_ReadOnly)
-        if dataset_ is None:
-            logger.info(f"Could not open file {image_path}")
-            raise FileNotFoundError(f"Could not open file {image_path}")
+        # try:
+            # dataset_ = gdal.Open(image_path, gdal.GA_ReadOnly)
+            # if dataset_ is None:
+            #     logger.info(f"Could not open file {image_path}")
+            #     raise FileNotFoundError(f"Could not open file {image_path}")
+            #
+            # band_count = dataset_.RasterCount
+            # if band_count < 1:
+            #     logger.info(f"No bands found in {image_path}")
+            #     raise ValueError(f"GeoTIFF has zero bands: {image_path}")
+            #
+            # data_list = []
+            # for b_idx in range(1, band_count + 1):
+            #     band_ = dataset_.GetRasterBand(b_idx)
+            #     if band_ is None:
+            #         logger.info(f"Could not access band #{b_idx} of {image_path}")
+            #         raise ValueError(f"Could not access band #{b_idx} of {image_path}")
+            #
+            #     band_data = band_.ReadAsArray()
+            #     if band_data is None:
+            #         logger.info(f"Failed to read data from band #{b_idx} of {image_path}")
+            #         raise ValueError(f"Failed to read data from band #{b_idx} of {image_path}")
+            #
+            #     data_list.append(band_data)
+            #
+            # # Stack all bands into a 3D NumPy array: (band_count, height, width)
+            # data = np.stack(data_list, axis=0)
+            #
+            # # Get GeoTransform
+            # geo_transform = dataset_.GetGeoTransform()
+            # if geo_transform is None:
+            #     logger.info(f"GeoTransform not found for file {image_path}")
+            #     logger.warning(f"GeoTransform not found for file {image_path}")
+            #
+            # # Get spatial reference
+            # spatial_ref = dataset_.GetProjection()
+            # if not spatial_ref:
+            #     logger.warning(f"Spatial reference system not defined for file {image_path}")
+            # measurement_type = 'OGM'
+            # return data, geo_transform, spatial_ref, measurement_type
+        logger.info(f"Loading OGM {image_path}")
+        process_observation(image_path)
+        measurement_type = 'OGM'
+            
+        # except Exception as e:
+        #     logger.info(f"mode 0 error due to {e}")
+        #     return None, None, None, None
 
-        # Retrieve the first band
-        band_ = dataset_.GetRasterBand(1)
-        if band_ is None:
-            logger.info(f"Could not access the first band of {image_path}")
-            raise ValueError(f"Could not access the first band of {image_path}")
-
-        # Read data as an array
-        data = band_.ReadAsArray()
-        if data is None:
-            logger.info(f"Failed to read data from the first band of {image_path}")
-            raise ValueError(f"Failed to read data from the first band of {image_path}")
-
-        # Get GeoTransform
-        geo_transform = dataset_.GetGeoTransform()
-        if geo_transform is None:
-            logger.info(f"GeoTransform not found for file {image_path}")
-            logger.warning(f"GeoTransform not found for file {image_path}")
-
-        # Get spatial reference
-        spatial_ref = dataset_.GetProjection()
-        if not spatial_ref:
-            logger.warning(f"Spatial reference system not defined for file {image_path}")
-
+    # elif mode == 1:  # Load the Observation of geo-referenced segmented drone image TFA-06
+    #     try:
+    #         for observation in sorted(os.listdir(image_path), reverse=False):
+    #             if observation.endswith("_Segment.tif"):
+    #                 if 'Fire' in observation:
+    #                     measurement_type = 'active_fire'
+    #                 elif 'Burnt' in observation:
+    #                     measurement_type = 'burnt_area'
+    #                 elif 'Flood' in observation:
+    #                     measurement_type = 'Flood'
+    #                 logger.info(f"processing segmented drone images {observation}")
+    #                 # process_observation(os.path.join(image_path, observation))
+    #                 ##############################################################
+    #                 # Clean up the old temporary file if it exists
+    #                 ##############################################################
+    #                 full_path = os.path.join(image_path, observation)
+    #                 dataset_ = gdal.Open(full_path, gdal.GA_ReadOnly)
+    #                 if dataset_ is None:
+    #                     logger.info(f"Could not open file {image_path}")
+    #                     raise FileNotFoundError(f"Could not open file {image_path}")
+    #
+    #                 band_count = dataset_.RasterCount
+    #                 if band_count < 1:
+    #                     logger.info(f"No bands found in {image_path}")
+    #                     raise ValueError(f"GeoTIFF has zero bands: {image_path}")
+    #
+    #                 data_list = []
+    #                 for b_idx in range(1, band_count + 1):
+    #                     band_ = dataset_.GetRasterBand(b_idx)
+    #                     if band_ is None:
+    #                         logger.info(f"Could not access band #{b_idx} of {image_path}")
+    #                         raise ValueError(f"Could not access band #{b_idx} of {image_path}")
+    #
+    #                     band_data = band_.ReadAsArray()
+    #                     if band_data is None:
+    #                         logger.info(f"Failed to read data from band #{b_idx} of {image_path}")
+    #                         raise ValueError(f"Failed to read data from band #{b_idx} of {image_path}")
+    #
+    #                     data_list.append(band_data)
+    #
+    #                 # Stack all bands into a 3D NumPy array: (band_count, height, width)
+    #                 data = np.stack(data_list, axis=0)
+    #
+    #                 # Get GeoTransform
+    #                 geo_transform = dataset_.GetGeoTransform()
+    #                 if geo_transform is None:
+    #                     logger.info(f"GeoTransform not found for file {image_path}")
+    #                     logger.warning(f"GeoTransform not found for file {image_path}")
+    #
+    #                 # Get spatial reference
+    #                 spatial_ref = dataset_.GetProjection()
+    #                 if not spatial_ref:
+    #                     logger.warning(f"Spatial reference system not defined for file {image_path}")
+    #                 ##############################################################
+    #                 logger.info(f"drone image full path {full_path}")
+    #                 ##############################################################
+    #                 if os.path.exists(full_path):
+    #                     os.remove(full_path)
+    #                 # break
+    #                 return data, geo_transform, spatial_ref, measurement_type
+    #     except Exception as e:
+    #         logger.info(f"mode 1 error due to {e}")
     elif mode == 1:  # Load the Observation of geo-referenced segmented drone image TFA-06
         for observation in sorted(os.listdir(image_path), reverse=False):
             if observation.endswith("_Segment.tif"):
+                if 'Fire' in observation:
+                    measurement_type = 'active_fire'
+                elif 'Burnt' in observation:
+                    measurement_type = 'burnt_area'
+                elif 'Flood' in observation:
+                    measurement_type = 'Flood'
                 logger.info(f"processing segmented drone images {observation}")
                 full_path = os.path.join(image_path, observation)
                 process_observation(os.path.join(image_path, observation))
@@ -2465,42 +2869,63 @@ def load_image(image_path, mode):
 
                 ##############################################################
                 # Clean up the old temporary file if it exists
-                if os.path.exists(full_path):
-                    os.remove(full_path)
+                # if os.path.exists(full_path):
+                #     os.remove(full_path)
                 break
 
     elif mode == 2:  # Load the Observation of geo-referenced object drone image TFA-05
-        for observation in sorted(os.listdir(image_path), reverse=False):
-            if observation.endswith("_Objects.tif"):
-                process_observation(os.path.join(image_path, observation))
-                # Clean up the old temporary file if it exists
-                full_path = os.path.join(image_path, observation)
-                if os.path.exists(full_path):
-                    os.remove(full_path)
-                break
+        try:
+            for observation in sorted(os.listdir(image_path), reverse=False):
+                if observation.endswith("_Objects.tif"):
+                    measurement_type = 'PersonVehicleDetection'
+                    process_observation(os.path.join(image_path, observation))
+                    ##############################################################
+                    # Clean up the old temporary file if it exists
+                    ##############################################################
+                    full_path = os.path.join(image_path, observation)
+                    if os.path.exists(full_path):
+                        os.remove(full_path)
+                    break
+        except Exception as e:
+            logger.info(f"mode 2 error due to {e}")
 
     elif mode == 3:  # Load the Observation of ROI satellite images TFA-08/09
-        for observation in sorted(os.listdir(image_path), reverse=False):
-            if observation.endswith(".tif"):
-                logger.info(f"processing segmented drone images {observation}")
-                full_path = os.path.join(image_path, observation)
-                process_observation(os.path.join(image_path, observation))
-                ##############################################################
-                # Clean up the old temporary file if it exists
-                if os.path.exists(full_path):
-                    os.remove(full_path)
-                break
+        try:
+            for observation in sorted(os.listdir(image_path), reverse=False):
+                if observation.endswith(".tif"):
+                    disaster_type = global_cache.get('natural_disaster', 'No disaster info')
+                    if disaster_type == 'Flood':
+                        measurement_type = 'Flood'
+                    elif disaster_type == 'Fire':
+                        measurement_type = 'burnt_area'
+                    logger.info(f"processing segmented drone images {observation}")
+                    process_observation(os.path.join(image_path, observation))
+                    ##############################################################
+                    # Clean up the old temporary file if it exists
+                    ##############################################################
+                    full_path = os.path.join(image_path, observation)
+                    if os.path.exists(full_path):
+                        os.remove(full_path)
+                    break
+        except Exception as e:
+            logger.info(f"mode 3 error due to {e}")
 
     elif mode == 4:  # Load the Observation of predictive models
-        for observation in sorted(os.listdir(image_path), reverse=False):
-            if observation.endswith((".tif", ".kmz")):
-                process_observation(os.path.join(image_path, observation))
-                full_path = os.path.join(image_path, observation)
-                if os.path.exists(full_path):
-                    os.remove(full_path)
-                break
-
-    return data, geo_transform, spatial_ref
+        try:
+            for observation in sorted(os.listdir(image_path), reverse=False):
+                if observation.endswith((".tif", ".kmz")):
+                    process_observation(os.path.join(image_path, observation))
+                    ##############################################################
+                    # Clean up the old temporary file if it exists
+                    ##############################################################
+                    full_path = os.path.join(image_path, observation)
+                    if os.path.exists(full_path):
+                        os.remove(full_path)
+                    break
+        except Exception as e:
+            logger.info(f"mode 4 error due to {e}")
+            
+    return data, geo_transform, spatial_ref, measurement_type
 
 
 def geojson_to_multi_band_geotiff(geojson_file, geotiff_file, pixel_size_lat, pixel_size_lon):
@@ -2580,11 +3005,12 @@ def get_geotiff_metadata_rasterio(geotiff_path):
         file_paths = [geotiff_path] if geotiff_path.endswith("_Objects.tif") else []
 
     if not file_paths:
-        print("No valid '_Objects.tif' files found.")
+        logger.info("No valid geo_referenced drone files found.")
+
         return None
 
     # 2) Iterate over files in sorted order
-    for file_path in sorted(file_paths):
+    for file_path in sorted(file_paths, reverse=False):
         dataset = gdal.Open(file_path)
         if dataset is None:
             print(f"Unable to open {file_path}")
@@ -2668,7 +3094,11 @@ def get_geotiff_metadata_rasterio(geotiff_path):
                 }
             }
             feature_collection["features"].append(feature)
-
+        # delete the file_path
+        ##################################################################################
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        ##################################################################################
         # 6) If we found any features, return the FeatureCollection from the first valid file
         if feature_collection["features"]:
             return feature_collection
@@ -2737,9 +3167,9 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, crs_epsg=4326):
         natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
         # Define metadata
         metadata = {
-            'title': 'OGM',
+            'title': 'Probabilistic Occupancy Grid Mapping for Dynamic Environments of ND',
             'author': 'GRVC lab, University of Seville',
-            'description': f"Estimated OGM for {natural_disaster}.",
+            'description': f"Probabilistic occupancy grid map for the {natural_disaster} scenario, enabling near real-time estimation and tracking of disaster propagation.",
             'creationDate': datetime.now().isoformat(),  # Current date and time
             "XMin": GTransform[0],
             "XRes": GTransform[1],
@@ -2748,7 +3178,7 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, crs_epsg=4326):
             "spatialReference": f"EPSG:{crs_epsg}",
             "file_name": FileName,
             "coordinates": global_cache.get('roi', [None]),
-            "bucket": "naples",
+            "bucket": "use",
             "minio_url": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/{FileName}'
 
         }
@@ -2811,7 +3241,7 @@ def pixel_to_coordinates(geo_transform, row, col):
     return y, x
 
 
-def coordinates_to_pixel(geo_transform, x_coord, y_coord):
+def coordinates_to_pixel_update(geo_transform, x_coord, y_coord):
     """
     Convert geographic coordinates (latitude, longitude) to pixel coordinates (row, column).
 
@@ -2859,101 +3289,22 @@ def coordinates_to_pixel(geo_transform, x_coord, y_coord):
     return int(round(row)), int(round(col))
 
 
-# This one is the function
-
-# def update_occupancy_grid(OGMData, OGM_gt_, observation_data_, observation_gt_):
-#     """
-#     Update the occupancy grid map using satellite, drone, and geo social-media measurements.
-#
-#     Parameters:
-#         OGMData (np.ndarray): Occupancy grid data.
-#         OGM_gt_ (dict): Geotransform for the occupancy grid.
-#         observation_data_ (np.ndarray): Observation data (e.g., drone or satellite image).
-#         observation_gt_ (dict): Geotransform for the observation.
-#
-#     Returns:
-#         np.ndarray: Updated occupancy grid map.
-#     """
-#
-#     epsilon = 1e-9  # Small value to avoid log(0) or division by zero
-#     # Get grid dimensions
-#
-#     grid_height, grid_width = OGMData.shape
-#     obs_height, obs_width = observation_data_.shape
-#
-#     for y in range(grid_height):
-#         for x in range(grid_width):
-#             try:
-#                 # Get the center pixel coordinates in geospatial terms
-#                 y_geo, x_geo = pixel_to_coordinates(OGM_gt_, x , y ) # + 0.5
-#
-#                 # Convert geospatial coordinates back to pixel coordinates
-#                 ogm_pixel = coordinates_to_pixel(OGM_gt_, x_geo, y_geo)
-#                 observation_pixel = coordinates_to_pixel(observation_gt_, x_geo, y_geo)
-#
-#                 # Bounds checking
-#                 if not (0 <= ogm_pixel[0] < grid_width and 0 <= ogm_pixel[1] < grid_height):
-#                     continue
-#                 if not (0 <= observation_pixel[0] < observation_data_.shape[1] and
-#                         0 <= observation_pixel[1] < observation_data_.shape[0]):
-#                     continue
-#
-#                 # Retrieve prior probability from OGM
-#                 ogm_y_axis, ogm_x_axis = int(ogm_pixel[1]), int(ogm_pixel[0])
-#                 prior_prob = OGMData[ogm_y_axis, ogm_x_axis]
-#
-#                 # Measurement (likelihood) at the observation pixel
-#                 obs_y_axis, obs_x_axis = int(observation_pixel[1]), int(observation_pixel[0])
-#                 likelihood = observation_data_[obs_y_axis, obs_x_axis]
-#
-#                 if likelihood > 0:
-#                     logger.info(f"likelihood-> {likelihood}")
-#
-#                 # Compute posterior probability if valid observation
-#                 if likelihood > 0:
-#                     P_z_given_x = likelihood
-#                     P_z_given_not_x = 1 - P_z_given_x
-#                     P_not_x = 1 - prior_prob
-#                     P_z = P_z_given_x * prior_prob + P_z_given_not_x * P_not_x
-#
-#                     if P_z > 0:
-#                         posterior_prob = (P_z_given_x * prior_prob) / P_z
-#                         log_odds_prev = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
-#                         log_odds_obs = math.log((posterior_prob + epsilon) / (1 - posterior_prob + epsilon))
-#                         log_odds_updated = log_odds_prev + log_odds_obs
-#
-#                         # Clamp log-odds and convert back to probability
-#                         log_odds_clamped = np.clip(log_odds_updated, -10, 10)
-#                         OGMData[ogm_y_axis, ogm_x_axis] = 1 - (1 / (1 + np.exp(log_odds_clamped)))
-#                 else:
-#                     # No valid measurement: retain prior
-#                     log_odds_prev = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
-#                     OGMData[ogm_y_axis, ogm_x_axis] = 1 - (1 / (1 + np.exp(log_odds_prev)))
-#
-#                 # Clamp probabilities to [0, 1]
-#                 OGMData[ogm_y_axis, ogm_x_axis] = np.clip(OGMData[ogm_y_axis, ogm_x_axis], 0, 1)
-#
-#             except Exception as e:
-#                 # Log error for this cell and continue
-#                 logger.debug(f"Error processing cell ({grid_height}, {grid_width}): {e}")
-#     return OGMData
-
-def update_occupancy_grid(OGMData, OGM_gt_, observation_data_, observation_gt_):
+def update_occupancy_grid_flood(OGMData,
+                                OGM_gt_,
+                                observation_data_,
+                                observation_gt_):
     """
-    Update the occupancy grid map using satellite, drone, and geo-social media measurements.
+    Update the occupancy grid map using satellite and drone measurements.
 
     Parameters:
-        OGMData (np.ndarray): Occupancy grid data.
-        OGM_gt_ (dict): Geotransform for the occupancy grid.
-        observation_data_ (np.ndarray): Observation data (e.g., drone or satellite image).
-        observation_gt_ (dict): Geotransform for the observation.
+        OGMData : Occupancy grid data.
+        OGM_gt_ : Geotransform for the occupancy grid.
+        observation_data_ : Observation data (e.g., drone or satellite image).
+        observation_gt_: Geotransform for the observation.
 
     Returns:
         np.ndarray: Updated occupancy grid map.
     """
-    import numpy as np
-    import math
-    import logging
 
     epsilon = 1e-9  # Small value to avoid log(0) or division by zero
     grid_height, grid_width = OGMData.shape
@@ -2964,8 +3315,8 @@ def update_occupancy_grid(OGMData, OGM_gt_, observation_data_, observation_gt_):
             y_geo, x_geo = pixel_to_coordinates(OGM_gt_, x, y)
 
             # Map geospatial coordinates back to pixel coordinates
-            ogm_pixel = coordinates_to_pixel(OGM_gt_, x_geo, y_geo)
-            observation_pixel = coordinates_to_pixel(observation_gt_, x_geo, y_geo)
+            ogm_pixel = coordinates_to_pixel_update(OGM_gt_, x_geo, y_geo)
+            observation_pixel = coordinates_to_pixel_update(observation_gt_, x_geo, y_geo)
 
             # Bounds checking
             if not (0 <= ogm_pixel[0] < grid_width and 0 <= ogm_pixel[1] < grid_height):
@@ -3007,85 +3358,133 @@ def update_occupancy_grid(OGMData, OGM_gt_, observation_data_, observation_gt_):
     return OGMData
 
 
-# def update_occupancy_grid(OGMData, OGM_gt_, observation_data_, observation_gt_):
-#     """
-#     Update the occupancy grid map using satellite, drone, and geo social-media measurements,
-#     accounting for differences in spatial resolution.
-#
-#     Parameters:
-#         OGMData (np.ndarray): Occupancy grid data.
-#         OGM_gt_ (Affine): Geotransform for the occupancy grid.
-#         observation_data_ (np.ndarray): Observation data (e.g., drone or satellite image).
-#         observation_gt_ (Affine): Geotransform for the observation.
-#
-#     Returns:
-#         np.ndarray: Updated occupancy grid map.
-#     """
-#
-#     epsilon = 1e-9  # Small value to avoid log(0) or division by zero
-#     grid_height, grid_width = OGMData.shape
-#
-#     # Dynamically resample observation data to match OGM resolution and extent
-#     resampling_factor_x = OGM_gt_.a / observation_gt_.a
-#     resampling_factor_y = OGM_gt_.e / observation_gt_.e
-#     resampled_observation = rasterio.warp.reproject(
-#         source=observation_data_,
-#         destination=np.zeros_like(OGMData, dtype=observation_data_.dtype),
-#         src_transform=observation_gt_,
-#         src_crs="EPSG:4326",  # Assumed CRS; adapt if different
-#         dst_transform=OGM_gt_,
-#         dst_crs="EPSG:4326",  # Assumed CRS; adapt if different
-#         resampling=Resampling.average
-#     )[1]
-#
-#     # Precompute all geospatial coordinates for OGM
-#     x_coords, y_coords = np.meshgrid(np.arange(grid_width), np.arange(grid_height))
-#     y_geo, x_geo = rasterio.transform.xy(OGM_gt_, y_coords, x_coords, offset="center")
-#     x_geo, y_geo = np.array(x_geo).flatten(), np.array(y_geo).flatten()
-#
-#     # Map geospatial coordinates to observation pixel space
-#     obs_cols, obs_rows = ~OGM_gt_ * (x_geo, y_geo)
-#     obs_cols, obs_rows = obs_cols.astype(int), obs_rows.astype(int)
-#
-#     # Mask for valid observation pixels
-#     valid_mask = (
-#         (0 <= obs_cols) & (obs_cols < resampled_observation.shape[1]) &
-#         (0 <= obs_rows) & (obs_rows < resampled_observation.shape[0])
-#     )
-#
-#     # Process valid pixels only
-#     valid_indices = np.where(valid_mask)[0]
-#     for idx in valid_indices:
-#         y, x = divmod(idx, grid_width)
-#         obs_col, obs_row = obs_cols[idx], obs_rows[idx]
-#
-#         # Retrieve prior probability from OGM
-#         prior_prob = OGMData[y, x]
-#
-#         # Measurement (likelihood) at the observation pixel
-#         likelihood = resampled_observation[obs_row, obs_col] / 255.0
-#
-#         if likelihood > 0:
-#             # Compute posterior probability
-#             P_z_given_x = likelihood
-#             P_z_given_not_x = 1 - P_z_given_x
-#             P_not_x = 1 - prior_prob
-#             P_z = P_z_given_x * prior_prob + P_z_given_not_x * P_not_x
-#
-#             if P_z > epsilon:  # Prevent division by zero
-#                 posterior_prob = (P_z_given_x * prior_prob) / P_z
-#                 log_odds_prev = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
-#                 log_odds_obs = math.log((posterior_prob + epsilon) / (1 - posterior_prob + epsilon))
-#                 log_odds_updated = log_odds_prev + log_odds_obs
-#
-#                 # Clamp log-odds and convert back to probability
-#                 log_odds_clamped = np.clip(log_odds_updated, -10, 10)
-#                 OGMData[y, x] = 1 - (1 / (1 + np.exp(log_odds_clamped)))
-#
-#         # Clamp probabilities to [0, 1]
-#         OGMData[y, x] = np.clip(OGMData[y, x], 0, 1)
-#
-#     return OGMData
+#############################################################################
+def update_occupancy_grid_fire(OGMData,
+                               OGM_gt_,
+                               measurement_data,
+                               measurement_gt_,
+                               measurement_type # "active_fire"  # or "burnt_area"
+):
+    """
+    Fuses ONE measurement into OGMData, where OGMData represents
+    the probability of *active fire* in each cell.
+
+    measurement_type can be:
+      - "active_fire"
+      - "burnt_area"
+
+    For "active_fire": we interpret high measurement -> high probability of active fire
+    For "burnt_area": we interpret high measurement -> NOT actively burning
+
+    So a burnt_area measurement *lowers* the OGM's probability of active fire.
+    """
+    # -- 1) Extract/convert geotransforms to 6-element tuples --
+    # try:
+    #     ogm_geo = (
+    #         OGM_gt_["origin_x"],
+    #         OGM_gt_["pixel_width"],
+    #         OGM_gt_["skew_x"],
+    #         OGM_gt_["origin_y"],
+    #         OGM_gt_["skew_y"],
+    #         OGM_gt_["pixel_height"]
+    #     )
+    # except Exception as e:
+    #     logger.info(f'error in converting ogm_gt {e}')
+    logger.info(f'ogm_geo -- {OGM_gt_}')
+    # try:
+    #     meas_geo = (
+    #         measurement_gt_["origin_x"],
+    #         measurement_gt_["pixel_width"],
+    #         measurement_gt_["skew_x"],
+    #         measurement_gt_["origin_y"],
+    #         measurement_gt_["skew_y"],
+    #         measurement_gt_["pixel_height"]
+    #     )
+    # except Exception as e:
+    #     logger.info(f'error in converting measurement_gt {e}')
+    logger.info(f"measurement_gt_ --{measurement_gt_}")
+    # -- 2) If measurement_data is 8-bit [0..255], convert to [0..1] --
+    # if measurement_data.max() > 1.0:
+    #     measurement_data = measurement_data.astype(np.float32) / 255.0
+
+    # -- 3) Dimensions and constants --
+    height, width = OGMData.shape
+    epsilon = 1e-9
+    ogm_geo = OGM_gt_
+    meas_geo = measurement_gt_
+    # -- 4) Iterate over each cell of OGMData --
+    for y in range(height):
+        for x in range(width):
+            # (y,x) -> geo coords
+            y_geo, x_geo = pixel_to_coordinates(ogm_geo, y, x)
+
+            # geo coords -> pixel in OGM (sanity check)
+            ogm_pixel = coordinates_to_pixel_update(ogm_geo, x_geo, y_geo)
+            # geo coords -> pixel in measurement
+            meas_pixel = coordinates_to_pixel_update(meas_geo, x_geo, y_geo)
+
+            # Check OGM bounds
+            if not (0 <= ogm_pixel[0] < width and 0 <= ogm_pixel[1] < height):
+                continue
+            # Check measurement bounds
+            if not (0 <= meas_pixel[0] < measurement_data.shape[1] and
+                    0 <= meas_pixel[1] < measurement_data.shape[0]):
+                continue
+
+            # Indices
+            ogm_y, ogm_x = int(ogm_pixel[1]), int(ogm_pixel[0])
+            prior_prob = OGMData[ogm_y, ogm_x]
+
+            obs_y, obs_x = int(meas_pixel[1]), int(meas_pixel[0])
+            sensor_val = measurement_data[obs_y, obs_x]  # in [0..1]
+
+            # ----------------------------------------------------
+            # 5) Convert sensor_val -> likelihood(cell is actively on fire)
+            #    depending on measurement_type
+            # ----------------------------------------------------
+            if measurement_type == "active_fire":
+                # High sensor_val => definitely on fire
+                # Low sensor_val => probably not on fire
+                # Example: directly use sensor_val in [0..1], with a small offset
+                likelihood = 0.05 + 0.9 * sensor_val
+
+            elif measurement_type == "burnt_area":
+                # High sensor_val => cell is burnt => likely NOT actively on fire
+                # So we invert to get the probability of active fire
+                # e.g. if sensor_val=1.0 => definitely burnt => 0% chance of still on fire
+                # if sensor_val=0.0 => no burn => possibly on fire
+                # We might do:
+                likelihood = 1.0 - 0.8 * sensor_val
+                # This means a fully burnt cell => likelihood=0.2 or 0.0, your choice
+
+            else:
+                # Possibly other measurement types, or error
+                raise ValueError(f"Unknown measurement_type: {measurement_type}")
+
+            # Clip to valid probability
+            likelihood = np.clip(likelihood, 0.0, 1.0)
+
+            # ----------------------------------------------------
+            # 6) Standard log-odds update
+            # ----------------------------------------------------
+            if 0 < likelihood < 1:
+                log_odds_prior = math.log((prior_prob + epsilon)/(1 - prior_prob + epsilon))
+                log_odds_obs   = math.log((likelihood + epsilon)/(1 - likelihood + epsilon))
+                log_odds_sum   = log_odds_prior + log_odds_obs
+
+                # clamp log-odds
+                log_odds_clamped = np.clip(log_odds_sum, -5, 5)
+
+                updated_prob = 1.0 / (1.0 + np.exp(-log_odds_clamped))
+                OGMData[ogm_y, ogm_x] = updated_prob
+
+            # final clamp
+            OGMData[ogm_y, ogm_x] = np.clip(OGMData[ogm_y, ogm_x], 0.0, 1.0)
+
+    return OGMData
+
+#############################################################################
+
 
 
 def is_within_fov(ogm_coords, obs_coords, tolerance=0.001):
@@ -3168,16 +3567,12 @@ def get_observations_in_FOV(georef_ogm, georef_observation):
     return updated_ogm
 
 
-def predict_ogm():
-    return load_image("downloads/", 4)
-
-
 def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
     """
         Process the occupancy grid, update the entity and upload the OGM to MinIO.
     """
 
-    logger.info(f"inside process_and_upload_ogm entity_id ---> {entity_id}")
+    # logger.info(f"inside process_and_upload_ogm entity_id ---> {entity_id}")
     print(f"inside process_and_upload_ogm entity_id ---> {entity_id}")
 
     object_name = file_path_.split("/")[-1]
@@ -3185,8 +3580,6 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
     print(f"file path {file_path_}")
     try:
         minio_client.upload_file(bucket_name, object_name, file_path_)
-        # minio_client.download_file(bucket_name, object_name,
-        #                            f"/home/abdalraheem/Documents/GitHub/Information_Fusion_PDM_tech_05/{object_name}")
         logger.info(f"File '{file_path_}' uploaded to bucket '{bucket_name}' successfully.")
         print(f"File '{file_path_}' uploaded to bucket '{bucket_name}' successfully.")
     except Exception as e:
@@ -3210,5 +3603,4 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
             logger.error(f"Failed to publish payload for entity: {entity_id}")
     except Exception as e:
         logger.error(f"Error updating NGSI-LD entity: {e}")
-
 
