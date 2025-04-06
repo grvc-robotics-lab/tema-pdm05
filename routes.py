@@ -875,7 +875,9 @@ def initialize_processing():
                     dirs_to_cleanup = [
                         "estimated_OGM",
                         f"downloads/drone_imgs/{disaster_type}",
-                        "georeferenced_drone_images/segmented",
+                        "georeferenced_drone_images/segmented/burnt",
+                        "georeferenced_drone_images/segmented/fire",
+                        "georeferenced_drone_images/segmented/flood",
                         "georeferenced_drone_images/detection",
                         "downloads/drone_planning",
                         "downloads/FloodSim",
@@ -1162,43 +1164,81 @@ def estimate_nd_status():
         logger.info(f"Error in prediction models due to {e}")
     ###################################################
     # Update OGM with drone data
-    observe_data_drone, observe_gt_drone, observe_proj_drone, data_type = load_image(
-        "georeferenced_drone_images/segmented", 1)
-    logger.info(f"observe_data_drone {np.asarray(observe_data_drone).shape}")
-    logger.info(f"observe_gt_drone {observe_gt_drone}")
-    logger.info(f"observe_proj_drone {observe_proj_drone}")
-    logger.info(f"data_type {data_type}")
-    ############################################################
-    # if observe_data_drone.max() > 1.0:
-    #     observe_data_drone = observe_data_drone.astype(np.float32) / 255.0
-    if observe_data_drone is None:
-        logger.error("observe_data_drone is None; check your data source or assignment")
-        print("observe_data_drone is None; please verify data loading.")
-    else:
-        observe_data_drone = np.asarray(observe_data_drone)
-        observe_data_drone = observe_data_drone / 255.0
-
-    ############################################################
-    logger.info(f"data_type ---> {data_type}")
-    # try:
-    if data_type == 'Flood' and observe_data_drone is not None:
-        ogm_data = np.asarray(ogm_data)
-        ogm_data = update_occupancy_grid_flood(ogm_data,
-                                               ogm_gt_,
-                                               observe_data_drone,
-                                               observe_gt_drone)
-        logger.info(f"OGM done successfully  FOR FLOOD ND {ogm_data.shape}")
-    # except Exception as e:
-    #     logger.info(f'Error in updating Flood OGM due to {e}')
-    # try:
-    if disaster_type == 'Fire' and observe_data_drone is not None:
-        if data_type == 'active_fire' or data_type == 'burnt_area':
-            ogm_data = update_occupancy_grid_fire(ogm_data,
-                                                  ogm_gt_,
-                                                  observe_data_drone,
-                                                  observe_gt_drone,
-                                                  data_type)
-            logger.info(f"OGM done successfully FOR FIRE ND {ogm_data.shape}")
+    ###################################################
+    if disaster_type == 'Flood':
+        observe_data_drone, observe_gt_drone, observe_proj_drone, data_type = load_image(
+            "georeferenced_drone_images/segmented/flood", 1)
+        logger.info(f"observe_data_drone {np.asarray(observe_data_drone).shape}")
+        logger.info(f"observe_gt_drone {observe_gt_drone}")
+        logger.info(f"observe_proj_drone {observe_proj_drone}")
+        logger.info(f"data_type {data_type}")
+        ############################################################
+        if observe_data_drone is None:
+            logger.error("observe_data_drone is None; check your data source or assignment")
+            print("observe_data_drone is None; please verify data loading.")
+        else:
+            observe_data_drone = np.asarray(observe_data_drone)
+            observe_data_drone = observe_data_drone / 255.0
+        ############################################################
+        logger.info(f"data_type ---> {data_type}")
+        # try:
+        if data_type == 'Flood' and observe_data_drone is not None:
+            ogm_data = np.asarray(ogm_data)
+            ogm_data = update_occupancy_grid_flood(ogm_data,
+                                                   ogm_gt_,
+                                                   observe_data_drone,
+                                                   observe_gt_drone)
+            logger.info(f"OGM done successfully  FOR FLOOD ND {ogm_data.shape}")
+    if disaster_type == "Fire":
+        # Fuse active fire measurements (segmented fire)
+        observe_data_drone, observe_gt_drone, observe_proj_drone, data_type = load_image(
+            "georeferenced_drone_images/segmented/fire", 1)
+        logger.info(f"observe_data_drone {np.asarray(observe_data_drone).shape}")
+        logger.info(f"observe_gt_drone {observe_gt_drone}")
+        logger.info(f"observe_proj_drone {observe_proj_drone}")
+        logger.info(f"data_type {data_type}")
+        ############################################################
+        if observe_data_drone is None:
+            logger.error("observe_data_drone is None; check your data source or assignment")
+            print("observe_data_drone is None; please verify data loading.")
+        else:
+            observe_data_drone = np.asarray(observe_data_drone)
+            observe_data_drone = observe_data_drone / 255.0
+        ############################################################
+        logger.info(f"data_type ---> {data_type}")
+        if disaster_type == 'Fire' and observe_data_drone is not None:
+            if data_type == 'active_fire':
+                ogm_data = update_occupancy_grid_fire(ogm_data,
+                                                      ogm_gt_,
+                                                      observe_data_drone,
+                                                      observe_gt_drone,
+                                                      data_type)
+                logger.info(f"OGM done successfully FOR FIRE ND {ogm_data.shape}")
+        ######################################################################
+        # Fuse burnt area measurements (segmented burnt area)
+        observe_data_drone, observe_gt_drone, observe_proj_drone, data_type = load_image(
+            "georeferenced_drone_images/segmented/burnt", 1)
+        logger.info(f"observe_data_drone {np.asarray(observe_data_drone).shape}")
+        logger.info(f"observe_gt_drone {observe_gt_drone}")
+        logger.info(f"observe_proj_drone {observe_proj_drone}")
+        logger.info(f"data_type {data_type}")
+        ############################################################
+        if observe_data_drone is None:
+            logger.error("observe_data_drone is None; check your data source or assignment")
+            print("observe_data_drone is None; please verify data loading.")
+        else:
+            observe_data_drone = np.asarray(observe_data_drone)
+            observe_data_drone = observe_data_drone / 255.0
+        ############################################################
+        logger.info(f"data_type ---> {data_type}")
+        if disaster_type == 'Fire' and observe_data_drone is not None:
+            if data_type == 'burnt_area':
+                ogm_data = update_occupancy_grid_fire(ogm_data,
+                                                      ogm_gt_,
+                                                      observe_data_drone,
+                                                      observe_gt_drone,
+                                                      data_type)
+                logger.info(f"OGM done successfully FOR FIRE ND {ogm_data.shape}")
     ######################################################################
     # Save updated OGM as GeoTIFF
     try:

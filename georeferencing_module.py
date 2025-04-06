@@ -12,10 +12,10 @@ import multiprocessing
 from logging_config import logger
 
 path = None
-
+output_path = None
 
 def main(natural_disaster, flag, ground_resolution):
-    global path
+    global path, output_path
     disaster = natural_disaster
     if natural_disaster == 'Flood':
         path = './downloads/drone_imgs/Flood/'
@@ -143,10 +143,11 @@ def main(natural_disaster, flag, ground_resolution):
         #         terrain_model, parallel_processing)
 
 
-def run_geo(output_path, path, disaster, file_name,
+def run_geo(output_path_, path, disaster, file_name,
             Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
             dem_res_meter,
             downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing, flag):
+
     # Inputs
     image_path = path + file_name
 
@@ -197,7 +198,7 @@ def run_geo(output_path, path, disaster, file_name,
                                          min_elevation,
                                          dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
 
-        create_geotif(output_path, file_name, '_Segment', image, 'none', georef_dic_seg, camera_orientation,
+        create_geotif(output_path_, file_name, '_Segment', image, 'none', georef_dic_seg, camera_orientation,
                       coordinate_systeme)
 
         # Clean up an old temporary files
@@ -282,7 +283,7 @@ def run_geo(output_path, path, disaster, file_name,
                 georef_dic_obj['label'] = labels[_]
                 boxes_georeferencing.append(georef_dic_obj)
 
-            create_geotif(output_path, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
+            create_geotif(output_path_, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
                           camera_orientation,
                           coordinate_systeme)
 
@@ -586,6 +587,16 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
     img_height, img_width = image.shape
     orig_dic = crn_dic
     if crn_dic == 'none': orig_dic = georef_data
+
+    if subject == '_Segment':
+        if 'Burnt' in file_name:
+            output += 'burnt/'
+        elif 'Fire' in file_name:
+            output += 'fire/'
+        else:
+            output += 'flood/'
+    elif subject == '_Objects':
+        pass
 
     # Create a new GeoTIFF file
     driver = gdal.GetDriverByName('GTiff')
