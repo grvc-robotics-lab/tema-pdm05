@@ -1901,7 +1901,7 @@ def get_roi(
         resolution,
         crs_epsg,
         band_count,
-        dem_path=None  # DEM file path; used only for one-band TIFF
+        dem_path  # DEM file path; used only for one-band TIFF
 ):
     """
     Create a GeoTIFF based on polygon coordinates with a specified resolution.
