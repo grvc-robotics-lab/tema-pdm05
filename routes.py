@@ -1,45 +1,3 @@
-# import copy
-# import threading
-#
-# # import matplotlib.pyplot as plt
-# import requests
-# import time
-# # import math
-# import os
-# # import numpy as np
-# import rasterio
-# # import logging
-# import config
-# import geopandas as gpd
-# import queue
-# import json
-# import numpy as np
-# from scipy.optimize import linear_sum_assignment
-# from flask import Flask, request, jsonify, Response
-# from flask_socketio import SocketIO
-# from osgeo import gdal, osr, ogr
-# # from rasterio.features import geometry_mask  #, rasterize
-# from rasterio.transform import from_bounds, rowcol #,  row col, xy
-# from Kalman_filter_estimating_Objects import KalmanFilter
-# from georeferencing_module import main
-# from minio_client import MinIOClient
-# from logging_config import logger
-# from pyproj import CRS, Transformer
-# # from datetime import timedelta
-# # from rasterio.windows import Window
-# # from datetime import datetime
-# from shapely.geometry import Polygon, box, shape  # mapping,
-# # from shapely.ops import transform
-# from concurrent.futures import ThreadPoolExecutor
-# # from rasterio.warp import calculate_default_transform, reproject, Resampling
-# from rasterio.mask import mask
-# from threading import Lock # Thread,
-# from datetime import datetime, timezone
-# from urllib.parse import urlparse
-# from rasterio.warp import reproject, Resampling
-# import math
-# import logging
-
 # Standard libraries
 import copy
 import threading
@@ -50,6 +8,7 @@ import queue
 import json
 import math
 import logging
+import cv2
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
@@ -1119,7 +1078,33 @@ def predict_ogm(ogm_file, flood_file):
 
     logger.info(f"Updated occupancy grid map written to: {ogm_file}")
 
+################################
+def update_drone_geotransform(old_geotransform, desired_resolution_m=1.0):
+    """
+    Update the drone geotransform to reflect a new resolution (meters per pixel).
 
+    Args:
+        old_geotransform (tuple): The original geotransform in the form
+            (origin_x, pixel_width, skew_x, origin_y, skew_y, pixel_height).
+        desired_resolution_m (float): Desired resolution in meters per pixel.
+
+    Returns:
+        tuple: New geotransform with updated pixel sizes.
+    """
+    origin_x, _, skew_x, origin_y, skew_y, _ = old_geotransform
+
+    # Approximate meters per degree (latitude is nearly constant; longitude depends on latitude)
+    meters_per_degree_lat = 111320.0
+    meters_per_degree_lon = 111320.0 * math.cos(math.radians(origin_y))
+
+    # Compute new pixel sizes in degrees
+    new_pixel_width = desired_resolution_m / meters_per_degree_lon
+    new_pixel_height = -desired_resolution_m / meters_per_degree_lat  # negative because y decreases
+
+    # Create new geotransform (keeping origin and skew the same)
+    new_geotransform = (origin_x, new_pixel_width, skew_x, origin_y, skew_y, new_pixel_height)
+    return new_geotransform
+#################################
 
 
 def estimate_nd_status():
@@ -2728,19 +2713,54 @@ def load_image(image_path, mode):
     ##############################################################################
     # logger.info(f"Loading image from {image_path} with mode {mode}")
 
-    def process_observation(observation_file):
+    def process_observation(observation_file, temp):
         nonlocal data, geo_transform, spatial_ref, measurement_type
         logger.info(f"Processing observation: {observation_file}")
         # Open the dataset with rasterio using a context manager.
-        with rasterio.open(observation_file) as src:
-            # Read the first band of data.
-            data = src.read(1)
-            # Get the geo-transform (affine transform in rasterio)
-            geo_transform = src.transform
-            geo_transform = geo_transform.to_gdal()
-            # Get the spatial reference (CRS)
-            spatial_ref = src.crs
-        return
+        if temp !=1:
+            with rasterio.open(observation_file) as src:
+                # Read the first band of data.
+                data = src.read(1)
+                # Get the geo-transform (affine transform in rasterio)
+                geo_transform = src.transform
+                geo_transform = geo_transform.to_gdal()
+                # Get the spatial reference (CRS)
+                spatial_ref = src.crs
+            return
+        elif temp==1:
+            with rasterio.open(observation_file) as src:
+                # Read the first band.
+                data = src.read(1)
+                # Get the affine transform and convert it to GDAL format:
+                gt = src.transform.to_gdal()  # (origin_x, pixel_width, skew_x, origin_y, skew_y, pixel_height)
+                origin_x, pixel_width, skew_x, origin_y, skew_y, pixel_height = gt
+
+                # --- Correct vertical orientation if needed ---
+                # For a north-up image, pixel_height should be negative.
+                if pixel_height > 0:
+                    logger.info("Pixel height is positive, flipping data vertically.")
+                    data = np.flipud(data)
+                    # Adjust the origin_y: new_origin_y = origin_y + (pixel_height * number_of_rows)
+                    nrows = data.shape[0]
+                    origin_y = origin_y + pixel_height * nrows
+                    pixel_height = -pixel_height
+
+                # --- Correct horizontal orientation if needed ---
+                # For a north-up image, pixel_width is expected to be positive.
+                if pixel_width < 0:
+                    logger.info("Pixel width is negative, flipping data horizontally.")
+                    data = np.fliplr(data)
+                    ncols = data.shape[1]
+                    origin_x = origin_x + pixel_width * ncols
+                    pixel_width = -pixel_width
+
+                # Reassemble the geotransform with corrected values.
+                geo_transform = (origin_x, pixel_width, skew_x, origin_y, skew_y, pixel_height)
+                # Get the spatial reference.
+                spatial_ref = src.crs
+            return
+
+            
 
     if mode == 0:  # Load previous OGM
         # try:
@@ -2784,7 +2804,7 @@ def load_image(image_path, mode):
             # measurement_type = 'OGM'
             # return data, geo_transform, spatial_ref, measurement_type
         logger.info(f"Loading OGM {image_path}")
-        process_observation(image_path)
+        process_observation(image_path, 0)
         measurement_type = 'OGM'
             
         # except Exception as e:
@@ -2864,7 +2884,7 @@ def load_image(image_path, mode):
                     measurement_type = 'Flood'
                 logger.info(f"processing segmented drone images {observation}")
                 full_path = os.path.join(image_path, observation)
-                process_observation(os.path.join(image_path, observation))
+                process_observation(os.path.join(image_path, observation), 1)
                 ##############################################################
 
                 ##############################################################
@@ -2878,7 +2898,7 @@ def load_image(image_path, mode):
             for observation in sorted(os.listdir(image_path), reverse=False):
                 if observation.endswith("_Objects.tif"):
                     measurement_type = 'PersonVehicleDetection'
-                    process_observation(os.path.join(image_path, observation))
+                    process_observation(os.path.join(image_path, observation), 2)
                     ##############################################################
                     # Clean up the old temporary file if it exists
                     ##############################################################
@@ -2899,7 +2919,7 @@ def load_image(image_path, mode):
                     elif disaster_type == 'Fire':
                         measurement_type = 'burnt_area'
                     logger.info(f"processing segmented drone images {observation}")
-                    process_observation(os.path.join(image_path, observation))
+                    process_observation(os.path.join(image_path, observation), 3)
                     ##############################################################
                     # Clean up the old temporary file if it exists
                     ##############################################################
@@ -2914,7 +2934,7 @@ def load_image(image_path, mode):
         try:
             for observation in sorted(os.listdir(image_path), reverse=False):
                 if observation.endswith((".tif", ".kmz")):
-                    process_observation(os.path.join(image_path, observation))
+                    process_observation(os.path.join(image_path, observation), 4)
                     ##############################################################
                     # Clean up the old temporary file if it exists
                     ##############################################################
@@ -3238,7 +3258,7 @@ def pixel_to_coordinates(geo_transform, row, col):
     # Calculate coordinates (handles skew/rotation)
     x = origin_x + col * pixel_width + row * skew_x
     y = origin_y + col * skew_y + row * pixel_height
-    return y, x
+    return x, y
 
 
 def coordinates_to_pixel_update(geo_transform, x_coord, y_coord):
@@ -3288,200 +3308,396 @@ def coordinates_to_pixel_update(geo_transform, x_coord, y_coord):
     col, row = pixel_coords
     return int(round(row)), int(round(col))
 
+#############################################################################
+# def update_occupancy_grid_flood(OGMData,
+#                                 OGM_gt_,
+#                                 observation_data_,
+#                                 observation_gt_):
+#     """
+#     Update the occupancy grid map using satellite and drone measurements.
+#
+#     Parameters:
+#         OGMData : Occupancy grid data.
+#         OGM_gt_ : Geotransform for the occupancy grid.
+#         observation_data_ : Observation data (e.g., drone or satellite image).
+#         observation_gt_: Geotransform for the observation.
+#
+#     Returns:
+#         np.ndarray: Updated occupancy grid map.
+#     """
+#
+#     epsilon = 1e-9  # Small value to avoid log(0) or division by zero
+#     grid_height, grid_width = OGMData.shape
+#
+#     for y in range(grid_height):
+#         for x in range(grid_width):
+#             # Convert grid coordinates to geospatial coordinates
+#             # y_geo, x_geo = pixel_to_coordinates(OGM_gt_, x, y)
+#             x_geo, y_geo = pixel_to_coordinates(OGM_gt_, y, x)
+#             # Map geospatial coordinates back to pixel coordinates
+#             ogm_pixel = coordinates_to_pixel_update(OGM_gt_, x_geo, y_geo)
+#             observation_pixel = coordinates_to_pixel_update(observation_gt_, x_geo, y_geo)
+#
+#             # Bounds checking
+#             if not (0 <= ogm_pixel[0] < grid_width and 0 <= ogm_pixel[1] < grid_height):
+#                 continue
+#             if not (0 <= observation_pixel[0] < observation_data_.shape[1] and
+#                     0 <= observation_pixel[1] < observation_data_.shape[0]):
+#                 continue
+#
+#             ogm_y, ogm_x = int(ogm_pixel[1]), int(ogm_pixel[0])
+#             prior_prob = OGMData[ogm_y, ogm_x]
+#
+#             obs_y, obs_x = int(observation_pixel[1]), int(observation_pixel[0])
+#             likelihood = observation_data_[obs_y, obs_x]
+#             likelihood = 0.5 + 0.5 * (likelihood - 0.1)
+#
+#             if 0 < likelihood <= 1:  # Valid probability range
+#                 # Compute log-odds for prior and observation
+#                 log_odds_prior = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
+#                 log_odds_obs = math.log((likelihood + epsilon) / (1 - likelihood + epsilon))
+#
+#                 # decay_factor = 0.95
+#                 log_odds_updated = log_odds_prior + log_odds_obs
+#
+#                 # Update log-odds
+#                 # log_odds_updated = log_odds_prior + log_odds_obs
+#
+#                 # Clamp log-odds to avoid extreme probabilities
+#                 log_odds_clamped = np.clip(log_odds_updated, -5, 5)
+#
+#                 # Convert log-odds back to probability
+#                 updated_prob = 1 - (1 / (1 + np.exp(log_odds_clamped)))
+#
+#                 # Update the OGM cell
+#                 OGMData[ogm_y, ogm_x] = updated_prob
+#
+#             # Clamp final probabilities to [0, 1] to prevent numerical errors
+#             OGMData[ogm_y, ogm_x] = np.clip(OGMData[ogm_y, ogm_x], 0, 1)
+#
+#     return OGMData
 
-def update_occupancy_grid_flood(OGMData,
-                                OGM_gt_,
-                                observation_data_,
-                                observation_gt_):
+def update_occupancy_grid_flood(OGMData, OGM_gt_,
+                                observation_data_, observation_gt_):
     """
-    Update the occupancy grid map using satellite and drone measurements.
+    Update the occupancy grid map (OGMData) using the observation (satellite or drone data)
+    over the area covered by the observation. This function:
+      1. Determines the geographic extent of the observation.
+      2. Extracts the corresponding patch from OGMData.
+      3. Upsamples the OGM patch to the observation's resolution.
+      4. Performs a log-odds update using the observation.
+      5. Downsamples the updated patch and reintegrates it into the full OGMData.
 
     Parameters:
-        OGMData : Occupancy grid data.
-        OGM_gt_ : Geotransform for the occupancy grid.
-        observation_data_ : Observation data (e.g., drone or satellite image).
-        observation_gt_: Geotransform for the observation.
+      - OGMData : 2D numpy array (low-res occupancy grid).
+      - OGM_gt_ : Geotransform tuple for the OGM.
+      - observation_data_ : 2D numpy array (observation, values in [0,1]).
+      - observation_gt_ : Geotransform tuple for the observation.
 
     Returns:
-        np.ndarray: Updated occupancy grid map.
+      - Updated OGMData (same dimensions as the input).
     """
+    epsilon = 1e-9
+    # observation_data_ = np.flip(observation_data_,axis=(0, 1))
 
-    epsilon = 1e-9  # Small value to avoid log(0) or division by zero
-    grid_height, grid_width = OGMData.shape
+    # --- 1. Compute the geographic extent of the observation ---
+    obs_rows, obs_cols = observation_data_.shape  # high-res dimensions
+    obs_origin_x = observation_gt_[0]
+    obs_origin_y = observation_gt_[3]
+    obs_pixel_width = observation_gt_[1]
+    obs_pixel_height = observation_gt_[5]  # typically negative for north-up images
 
-    for y in range(grid_height):
-        for x in range(grid_width):
-            # Convert grid coordinates to geospatial coordinates
-            y_geo, x_geo = pixel_to_coordinates(OGM_gt_, x, y)
+    # Calculate geographic bounds of the observation:
+    obs_x_min = obs_origin_x
+    obs_y_max = obs_origin_y  # top (max latitude)
+    obs_x_max = obs_origin_x + obs_pixel_width * obs_cols
+    obs_y_min = obs_origin_y + obs_pixel_height * obs_rows
 
-            # Map geospatial coordinates back to pixel coordinates
-            ogm_pixel = coordinates_to_pixel_update(OGM_gt_, x_geo, y_geo)
-            observation_pixel = coordinates_to_pixel_update(observation_gt_, x_geo, y_geo)
+    # --- 2. Determine the corresponding OGM patch ---
+    # Convert the observation's geographic corners to OGM pixel indices.
+    top_left_ogm = coordinates_to_pixel_update(OGM_gt_, obs_x_min, obs_y_max)
+    bottom_right_ogm = coordinates_to_pixel_update(OGM_gt_, obs_x_max, obs_y_min)
 
-            # Bounds checking
-            if not (0 <= ogm_pixel[0] < grid_width and 0 <= ogm_pixel[1] < grid_height):
+    # Ensure proper ordering (min/max rows and columns)
+    ogm_row_min = min(top_left_ogm[0], bottom_right_ogm[0])
+    ogm_row_max = max(top_left_ogm[0], bottom_right_ogm[0])
+    ogm_col_min = min(top_left_ogm[1], bottom_right_ogm[1])
+    ogm_col_max = max(top_left_ogm[1], bottom_right_ogm[1])
+
+    # Extract the patch from OGMData.
+    ogm_patch = OGMData[ogm_row_min:ogm_row_max + 1, ogm_col_min:ogm_col_max + 1]
+
+    # --- 3. Upsample the OGM patch to observation resolution ---
+    # We want the high-res patch to have the same dimensions as the observation.
+    highres_rows = obs_rows
+    highres_cols = obs_cols
+    ogm_patch_upsampled = cv2.resize(ogm_patch, (highres_cols, highres_rows), interpolation=cv2.INTER_LINEAR)
+
+    # Define a new geotransform for the upsampled patch that exactly covers the observation's geographic area.
+    patch_gt = (obs_x_min, obs_pixel_width, 0,
+                obs_y_max, 0, obs_pixel_height)
+
+    # --- 4. Fusion update at high resolution ---
+    for j in range(highres_rows):  # row index in high-res patch
+        for i in range(highres_cols):  # col index in high-res patch
+            # Convert the high-res pixel (j, i) into geographic coordinates.
+            x_geo, y_geo = pixel_to_coordinates(patch_gt, j, i)
+
+            # Map these geographic coordinates to observation pixel indices.
+            obs_pix = coordinates_to_pixel_update(observation_gt_, x_geo, y_geo)
+            if not (0 <= obs_pix[0] < obs_rows and 0 <= obs_pix[1] < obs_cols):
                 continue
-            if not (0 <= observation_pixel[0] < observation_data_.shape[1] and
-                    0 <= observation_pixel[1] < observation_data_.shape[0]):
-                continue
 
-            ogm_y, ogm_x = int(ogm_pixel[1]), int(ogm_pixel[0])
-            prior_prob = OGMData[ogm_y, ogm_x]
+            # Retrieve the observation value.
+            obs_val = observation_data_[obs_pix[0], obs_pix[1]]
+            # Compute likelihood based on the given formula:
+            likelihood = 0.5 + 0.5 * (obs_val - 0.1)
 
-            obs_y, obs_x = int(observation_pixel[1]), int(observation_pixel[0])
-            likelihood = observation_data_[obs_y, obs_x]
-            likelihood = 0.5 + 0.5 * (likelihood - 0.1)
+            # Retrieve current probability from the upsampled patch.
+            prior_prob = ogm_patch_upsampled[j, i]
 
-            if 0 < likelihood <= 1:  # Valid probability range
-                # Compute log-odds for prior and observation
+            # Log-odds update, if likelihood is in a valid range.
+            if 0 < likelihood <= 1:
                 log_odds_prior = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
                 log_odds_obs = math.log((likelihood + epsilon) / (1 - likelihood + epsilon))
-
-                # decay_factor = 0.95
                 log_odds_updated = log_odds_prior + log_odds_obs
-
-                # Update log-odds
-                # log_odds_updated = log_odds_prior + log_odds_obs
-
-                # Clamp log-odds to avoid extreme probabilities
                 log_odds_clamped = np.clip(log_odds_updated, -5, 5)
-
-                # Convert log-odds back to probability
+                # Flood update formula: note the inversion in the final step.
                 updated_prob = 1 - (1 / (1 + np.exp(log_odds_clamped)))
+                ogm_patch_upsampled[j, i] = updated_prob
 
-                # Update the OGM cell
-                OGMData[ogm_y, ogm_x] = updated_prob
+            ogm_patch_upsampled[j, i] = np.clip(ogm_patch_upsampled[j, i], 0, 1)
 
-            # Clamp final probabilities to [0, 1] to prevent numerical errors
-            OGMData[ogm_y, ogm_x] = np.clip(OGMData[ogm_y, ogm_x], 0, 1)
+    # --- 5. Downsample the high-resolution patch back to original OGM patch resolution ---
+    orig_patch_rows, orig_patch_cols = ogm_patch.shape
+    fused_patch_downsampled = cv2.resize(ogm_patch_upsampled, (orig_patch_cols, orig_patch_rows),
+                                         interpolation=cv2.INTER_AREA)
 
-    return OGMData
+    # --- 6. Replace the corresponding region in the full OGMData ---
+    updated_OGM = OGMData.copy()
+    updated_OGM[ogm_row_min:ogm_row_max + 1, ogm_col_min:ogm_col_max + 1] = fused_patch_downsampled
 
-
+    # --- 7. Return the updated full OGMData ---
+    return updated_OGM
 #############################################################################
-def update_occupancy_grid_fire(OGMData,
-                               OGM_gt_,
-                               measurement_data,
-                               measurement_gt_,
-                               measurement_type # "active_fire"  # or "burnt_area"
-):
+def update_occupancy_grid_fire(OGMData, OGM_gt_,
+                               measurement_data, measurement_gt_,
+                               measurement_type):
     """
-    Fuses ONE measurement into OGMData, where OGMData represents
-    the probability of *active fire* in each cell.
+    Fuses ONE drone measurement into OGMData.
 
-    measurement_type can be:
-      - "active_fire"
-      - "burnt_area"
+    This version only increases the spatial resolution of the OGM in the
+    geographic area covered by the drone measurement:
+      1. Compute the drone measurement geographic extent.
+      2. Extract the corresponding OGM patch.
+      3. Upsample that patch to the drone measurement resolution.
+      4. Fuse the drone measurement using the log-odds update (performed at high resolution).
+      5. Downsample the fused patch back to the original OGM patch resolution.
+      6. Replace the corresponding area in OGMData.
 
-    For "active_fire": we interpret high measurement -> high probability of active fire
-    For "burnt_area": we interpret high measurement -> NOT actively burning
+    Parameters:
+      - OGMData: 2D numpy array for the low-res occupancy grid.
+      - OGM_gt_: GeoTransform for the OGM (tuple of 6 numbers).
+      - measurement_data: 2D numpy array (drone measurement, values in [0,1]).
+      - measurement_gt_: GeoTransform for the drone measurement image.
+      - measurement_type: either "active_fire" or "burnt_area".
 
-    So a burnt_area measurement *lowers* the OGM's probability of active fire.
+    Returns:
+      - Updated OGMData (of the same shape as the input) with the fused measurement.
     """
-    # -- 1) Extract/convert geotransforms to 6-element tuples --
-    # try:
-    #     ogm_geo = (
-    #         OGM_gt_["origin_x"],
-    #         OGM_gt_["pixel_width"],
-    #         OGM_gt_["skew_x"],
-    #         OGM_gt_["origin_y"],
-    #         OGM_gt_["skew_y"],
-    #         OGM_gt_["pixel_height"]
-    #     )
-    # except Exception as e:
-    #     logger.info(f'error in converting ogm_gt {e}')
-    logger.info(f'ogm_geo -- {OGM_gt_}')
-    # try:
-    #     meas_geo = (
-    #         measurement_gt_["origin_x"],
-    #         measurement_gt_["pixel_width"],
-    #         measurement_gt_["skew_x"],
-    #         measurement_gt_["origin_y"],
-    #         measurement_gt_["skew_y"],
-    #         measurement_gt_["pixel_height"]
-    #     )
-    # except Exception as e:
-    #     logger.info(f'error in converting measurement_gt {e}')
-    logger.info(f"measurement_gt_ --{measurement_gt_}")
-    # -- 2) If measurement_data is 8-bit [0..255], convert to [0..1] --
-    # if measurement_data.max() > 1.0:
-    #     measurement_data = measurement_data.astype(np.float32) / 255.0
-
-    # -- 3) Dimensions and constants --
-    height, width = OGMData.shape
     epsilon = 1e-9
-    ogm_geo = OGM_gt_
-    meas_geo = measurement_gt_
-    # -- 4) Iterate over each cell of OGMData --
-    for y in range(height):
-        for x in range(width):
-            # (y,x) -> geo coords
-            y_geo, x_geo = pixel_to_coordinates(ogm_geo, y, x)
 
-            # geo coords -> pixel in OGM (sanity check)
-            ogm_pixel = coordinates_to_pixel_update(ogm_geo, x_geo, y_geo)
-            # geo coords -> pixel in measurement
-            meas_pixel = coordinates_to_pixel_update(meas_geo, x_geo, y_geo)
+    # --- 1. Compute the geographic extent of the drone measurement ---
+    meas_rows, meas_cols = measurement_data.shape  # drone image dimensions
+    # measurement_gt_ is assumed to be: (origin_x, pixel_width, skew_x, origin_y, skew_y, pixel_height)
+    meas_origin_x = measurement_gt_[0]
+    meas_origin_y = measurement_gt_[3]
+    meas_pixel_width = measurement_gt_[1]
+    meas_pixel_height = measurement_gt_[5]  # likely negative (north-up)
 
-            # Check OGM bounds
-            if not (0 <= ogm_pixel[0] < width and 0 <= ogm_pixel[1] < height):
+    # Compute the geographic bounds of the drone image:
+    # Top-left corner:
+    meas_x_min = meas_origin_x
+    meas_y_max = meas_origin_y
+    # Bottom-right corner:
+    meas_x_max = meas_origin_x + meas_pixel_width * meas_cols
+    meas_y_min = meas_origin_y + meas_pixel_height * meas_rows
+
+    # --- 2. Determine the corresponding OGM patch in OGMData ---
+    # Use your coordinates_to_pixel_update function (which returns (row, col)) on the corners.
+    top_left_ogm = coordinates_to_pixel_update(OGM_gt_, meas_x_min, meas_y_max)
+    bottom_right_ogm = coordinates_to_pixel_update(OGM_gt_, meas_x_max, meas_y_min)
+
+    # Ensure proper ordering (rows and cols):
+    ogm_row_min = min(top_left_ogm[0], bottom_right_ogm[0])
+    ogm_row_max = max(top_left_ogm[0], bottom_right_ogm[0])
+    ogm_col_min = min(top_left_ogm[1], bottom_right_ogm[1])
+    ogm_col_max = max(top_left_ogm[1], bottom_right_ogm[1])
+
+    # Extract the patch from OGMData.
+    ogm_patch = OGMData[ogm_row_min:ogm_row_max + 1, ogm_col_min:ogm_col_max + 1]
+
+    # --- 3. Upsample the OGM patch to drone resolution ---
+    # The high-res patch dimensions will match the drone measurement dimensions.
+    highres_rows = meas_rows
+    highres_cols = meas_cols
+    ogm_patch_upsampled = cv2.resize(ogm_patch, (highres_cols, highres_rows), interpolation=cv2.INTER_LINEAR)
+
+    # Define a new geotransform for the upsampled patch.
+    # Here we use the drone measurement's geographic extent.
+    patch_gt = (meas_x_min, meas_pixel_width, 0,
+                meas_y_max, 0, meas_pixel_height)
+
+    # --- 4. Fusion update at high resolution ---
+    # For each pixel in the high-res patch, update based on the drone measurement.
+    for j in range(highres_rows):  # row index in upsampled patch
+        for i in range(highres_cols):  # col index in upsampled patch
+            # Convert high-res pixel (j,i) to geographic coordinates using patch_gt.
+            x_geo, y_geo = pixel_to_coordinates(patch_gt, j, i)
+
+            # Map geographic coordinates to drone measurement pixel indices.
+            meas_pix = coordinates_to_pixel_update(measurement_gt_, x_geo, y_geo)
+            # Check bounds in the drone measurement:
+            if not (0 <= meas_pix[0] < meas_rows and 0 <= meas_pix[1] < meas_cols):
                 continue
-            # Check measurement bounds
-            if not (0 <= meas_pixel[0] < measurement_data.shape[1] and
-                    0 <= meas_pixel[1] < measurement_data.shape[0]):
-                continue
+            sensor_val = measurement_data[meas_pix[0], meas_pix[1]]  # in [0,1]
 
-            # Indices
-            ogm_y, ogm_x = int(ogm_pixel[1]), int(ogm_pixel[0])
-            prior_prob = OGMData[ogm_y, ogm_x]
+            # Get current probability from upsampled OGM patch.
+            prior_prob = ogm_patch_upsampled[j, i]
 
-            obs_y, obs_x = int(meas_pixel[1]), int(meas_pixel[0])
-            sensor_val = measurement_data[obs_y, obs_x]  # in [0..1]
-
-            # ----------------------------------------------------
-            # 5) Convert sensor_val -> likelihood(cell is actively on fire)
-            #    depending on measurement_type
-            # ----------------------------------------------------
+            # Convert sensor value to likelihood.
             if measurement_type == "active_fire":
-                # High sensor_val => definitely on fire
-                # Low sensor_val => probably not on fire
-                # Example: directly use sensor_val in [0..1], with a small offset
                 likelihood = 0.05 + 0.9 * sensor_val
-
             elif measurement_type == "burnt_area":
-                # High sensor_val => cell is burnt => likely NOT actively on fire
-                # So we invert to get the probability of active fire
-                # e.g. if sensor_val=1.0 => definitely burnt => 0% chance of still on fire
-                # if sensor_val=0.0 => no burn => possibly on fire
-                # We might do:
                 likelihood = 1.0 - 0.8 * sensor_val
-                # This means a fully burnt cell => likelihood=0.2 or 0.0, your choice
-
             else:
-                # Possibly other measurement types, or error
                 raise ValueError(f"Unknown measurement_type: {measurement_type}")
-
-            # Clip to valid probability
             likelihood = np.clip(likelihood, 0.0, 1.0)
 
-            # ----------------------------------------------------
-            # 6) Standard log-odds update
-            # ----------------------------------------------------
+            # Log-odds update.
             if 0 < likelihood < 1:
-                log_odds_prior = math.log((prior_prob + epsilon)/(1 - prior_prob + epsilon))
-                log_odds_obs   = math.log((likelihood + epsilon)/(1 - likelihood + epsilon))
-                log_odds_sum   = log_odds_prior + log_odds_obs
-
-                # clamp log-odds
+                log_odds_prior = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
+                log_odds_obs = math.log((likelihood + epsilon) / (1 - likelihood + epsilon))
+                log_odds_sum = log_odds_prior + log_odds_obs
                 log_odds_clamped = np.clip(log_odds_sum, -5, 5)
-
                 updated_prob = 1.0 / (1.0 + np.exp(-log_odds_clamped))
-                OGMData[ogm_y, ogm_x] = updated_prob
+                ogm_patch_upsampled[j, i] = updated_prob
 
-            # final clamp
-            OGMData[ogm_y, ogm_x] = np.clip(OGMData[ogm_y, ogm_x], 0.0, 1.0)
+            ogm_patch_upsampled[j, i] = np.clip(ogm_patch_upsampled[j, i], 0.0, 1.0)
 
-    return OGMData
+    # --- 5. Downsample the fused high-resolution patch back to original OGM patch resolution ---
+    orig_patch_rows, orig_patch_cols = ogm_patch.shape
+    fused_patch_downsampled = cv2.resize(ogm_patch_upsampled, (orig_patch_cols, orig_patch_rows),
+                                         interpolation=cv2.INTER_AREA)
+
+    # --- 6. Replace the corresponding region in the full OGMData ---
+    updated_OGM = OGMData.copy()  # avoid modifying the original in-place
+    updated_OGM[ogm_row_min:ogm_row_max + 1, ogm_col_min:ogm_col_max + 1] = fused_patch_downsampled
+
+    # --- 7. Return the updated full OGMData ---
+    return updated_OGM
+
+
+# def update_occupancy_grid_fire(OGMData,
+#                                OGM_gt_,
+#                                measurement_data,
+#                                measurement_gt_,
+#                                measurement_type # "active_fire"  # or "burnt_area"
+# ):
+#     """
+#     Fuses ONE measurement into OGMData, where OGMData represents
+#     the probability of *active fire* in each cell.
+#
+#     measurement_type can be:
+#       - "active_fire"
+#       - "burnt_area"
+#
+#     For "active_fire": we interpret high measurement -> high probability of active fire
+#     For "burnt_area": we interpret high measurement -> NOT actively burning
+#
+#     So a burnt_area measurement *lowers* the OGM's probability of active fire.
+#     """
+#
+#     logger.info(f'ogm_geo -- {OGM_gt_}')
+#     logger.info(f"measurement_gt_ --{measurement_gt_}")
+#     # measurement_gt_ = update_drone_geotransform(measurement_gt_, desired_resolution_m=1.0)
+#     # -- 3) Dimensions and constants --
+#     height, width = OGMData.shape
+#     epsilon = 1e-9
+#     ogm_geo = OGM_gt_
+#     meas_geo = measurement_gt_
+#     # -- 4) Iterate over each cell of OGMData --
+#     for y in range(height):
+#         for x in range(width):
+#             # (y,x) -> geo coords
+#             # y_geo, x_geo = pixel_to_coordinates(ogm_geo, y, x)
+#             x_geo, y_geo = pixel_to_coordinates(ogm_geo, y, x)
+#
+#             # geo coords -> pixel in OGM (sanity check)
+#             ogm_pixel = coordinates_to_pixel_update(ogm_geo, x_geo, y_geo)
+#             # geo coords -> pixel in measurement
+#             meas_pixel = coordinates_to_pixel_update(meas_geo, x_geo, y_geo)
+#             ##################################################################
+#
+#             # Check OGM bounds
+#             if not (0 <= ogm_pixel[0] < width and 0 <= ogm_pixel[1] < height):
+#                 continue
+#             # Check measurement bounds
+#             if not (0 <= meas_pixel[0] < measurement_data.shape[1] and
+#                     0 <= meas_pixel[1] < measurement_data.shape[0]):
+#                 continue
+#
+#             # Indices
+#             ogm_y, ogm_x = int(ogm_pixel[1]), int(ogm_pixel[0])
+#             prior_prob = OGMData[ogm_y, ogm_x]
+#
+#             obs_y, obs_x = int(meas_pixel[1]), int(meas_pixel[0])
+#             sensor_val = measurement_data[obs_y, obs_x]  # in [0..1]
+#
+#             # ----------------------------------------------------
+#             # 5) Convert sensor_val -> likelihood(cell is actively on fire)
+#             #    depending on measurement_type
+#             # ----------------------------------------------------
+#             if measurement_type == "active_fire":
+#                 # High sensor_val => definitely on fire
+#                 # Low sensor_val => probably not on fire
+#                 # Example: directly use sensor_val in [0..1], with a small offset
+#                 likelihood = 0.05 + 0.9 * sensor_val
+#
+#             elif measurement_type == "burnt_area":
+#                 # High sensor_val => cell is burnt => likely NOT actively on fire
+#                 # So we invert to get the probability of active fire
+#                 # e.g. if sensor_val=1.0 => definitely burnt => 0% chance of still on fire
+#                 # if sensor_val=0.0 => no burn => possibly on fire
+#                 # We might do:
+#                 likelihood = 1.0 - 0.8 * sensor_val
+#                 # This means a fully burnt cell => likelihood=0.2 or 0.0, your choice
+#
+#             else:
+#                 # Possibly other measurement types, or error
+#                 raise ValueError(f"Unknown measurement_type: {measurement_type}")
+#
+#             # Clip to valid probability
+#             likelihood = np.clip(likelihood, 0.0, 1.0)
+#
+#             # ----------------------------------------------------
+#             # 6) Standard log-odds update
+#             # ----------------------------------------------------
+#             if 0 < likelihood < 1:
+#                 log_odds_prior = math.log((prior_prob + epsilon)/(1 - prior_prob + epsilon))
+#                 log_odds_obs   = math.log((likelihood + epsilon)/(1 - likelihood + epsilon))
+#                 log_odds_sum   = log_odds_prior + log_odds_obs
+#
+#                 # clamp log-odds
+#                 log_odds_clamped = np.clip(log_odds_sum, -5, 5)
+#
+#                 updated_prob = 1.0 / (1.0 + np.exp(-log_odds_clamped))
+#                 OGMData[ogm_y, ogm_x] = updated_prob
+#
+#             # final clamp
+#             OGMData[ogm_y, ogm_x] = np.clip(OGMData[ogm_y, ogm_x], 0.0, 1.0)
+#
+#     return OGMData
 
 #############################################################################
 
