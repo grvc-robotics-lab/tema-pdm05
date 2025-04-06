@@ -11,7 +11,7 @@ import logging
 import cv2
 from datetime import datetime, timezone
 from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Third‑party libraries
 import requests
@@ -77,6 +77,8 @@ processing_lock = Lock()
 ogm_flag = False
 ogm_counter = 0
 
+georeferenced_seg_flag = False
+georeferenced_obj_flag = False
 
 ###################################################################
 @app.route(f'/{config.BASE_PATH}')
@@ -181,6 +183,7 @@ def notify():
 ###################################################################
 
 def handle_person_vehicle_detection(notification, parameters):
+    global georeferenced_obj_flag
     auth_filename = notification.get('parameters', {}).get('value', {}).get('FileName', None)
     detection = notification.get("detection", {}).get('value', {})
 
@@ -231,6 +234,7 @@ def handle_person_vehicle_detection(notification, parameters):
         logger.info(f"Files written successfully: {json_file_path_metadata}, {json_file_path_detection}")
         try:
             main(disaster_info, "bbox", ground_resolution=1.0)
+            georeferenced_obj_flag = True
             logger.info("Geo-referencing is done correctly for person and vehicles.")
         except Exception as e:
             logger.error(f"Issue in geo-referencing due to {e}")
@@ -240,6 +244,7 @@ def handle_person_vehicle_detection(notification, parameters):
 
 
 def handle_segmentation(notification):
+    global georeferenced_seg_flag
     bucket = notification.get("bucket", {}).get('value')
     auth_filename = notification.get('segmentation', {}).get('value')
     disaster = global_cache.get('natural_disaster', 'No disaster info')
@@ -271,6 +276,7 @@ def handle_segmentation(notification):
             # print(f"File downloaded successfully to {downloaded_file_path}")
             try:
                 main(disaster, "segmented", ground_resolution=1.0)
+                georeferenced_seg_flag = True
                 logger.info("Geo-referencing is done correctly for segmented images.")
             except Exception as e:
                 logger.error(f"Issue in geo-referencing due to {e}")
@@ -869,7 +875,8 @@ def initialize_processing():
                     dirs_to_cleanup = [
                         "estimated_OGM",
                         f"downloads/drone_imgs/{disaster_type}",
-                        "georeferenced_drone_images",
+                        "georeferenced_drone_images/segmented",
+                        "georeferenced_drone_images/detection",
                         "downloads/drone_planning",
                         "downloads/FloodSim",
                         "downloads/FireSim",
@@ -920,6 +927,8 @@ def initialize_processing():
                 # Do not clear the alert_event here if you want it to remain active
                 # alert_event.clear()  <-- Remove this if you rely solely on the timestamp.
 
+            ##########################################################################
+            
             # Process Non‑Alert Notifications only if no new alert has arrived.
             if other_entity_event.is_set() and entities_initialized:
                 # Extra check: if the global alert timestamp has changed recently,
@@ -929,16 +938,20 @@ def initialize_processing():
                     logger.info("A new alert arrived. Skipping non-alert processing this iteration.")
                     other_entity_event.clear()
                 else:
-                    try:
-                        estimate_nd_status()
-                    except Exception as e:
-                        logger.info(f"No OGM for ND due to {e}")
-                    try:
-                        estimate_objects_status()
-                    except Exception as e:
-                        logger.info(f"No OGM for objects due to {e}")
+                    with ThreadPoolExecutor(max_workers=8) as executor:
+                        future_nd = executor.submit(estimate_nd_status)
+                        future_obj = executor.submit(estimate_objects_status)
+                        for future in as_completed([future_nd, future_obj]):
+                            try:
+                                future.result()  # Wait for the function to complete.
+                            except Exception as e:
+                                if future == future_nd:
+                                    logger.info(f"No OGM for ND due to {e}")
+                                else:
+                                    logger.info(f"No OGM for objects due to {e}")
                     other_entity_event.clear()
 
+            #########################################################################
         except Exception as e:
             logger.error(f"Error during initialize_processing: {e}")
 
@@ -1108,7 +1121,10 @@ def update_drone_geotransform(old_geotransform, desired_resolution_m=1.0):
 
 
 def estimate_nd_status():
-    global polygon_coordinates
+    global polygon_coordinates, georeferenced_seg_flag
+    ############################################################
+    # while georeferenced_seg_flag:
+    ############################################################
     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
     ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
     ogm_data, ogm_gt_, ogm_proj, data_type = load_image(ogm_path, 0)
@@ -1147,7 +1163,7 @@ def estimate_nd_status():
     ###################################################
     # Update OGM with drone data
     observe_data_drone, observe_gt_drone, observe_proj_drone, data_type = load_image(
-        "georeferenced_drone_images", 1)
+        "georeferenced_drone_images/segmented", 1)
     logger.info(f"observe_data_drone {np.asarray(observe_data_drone).shape}")
     logger.info(f"observe_gt_drone {observe_gt_drone}")
     logger.info(f"observe_proj_drone {observe_proj_drone}")
@@ -1512,6 +1528,8 @@ def estimate_objects_status():
     5) Save final OGM (overwrite + timestamped, filtering label == -1 only from the timestamped).
     6) Prepare metadata and upload the final result.
     """
+    # global georeferenced_obj_flag
+    # while georeferenced_obj_flag:
     # (1) Load OGM
     disaster_type = global_cache.get("natural_disaster", "NoDisaster")
     if disaster_type == "NoDisaster":
@@ -1531,7 +1549,7 @@ def estimate_objects_status():
 
 
     # (2) Integrate Drone Data (Association + update)
-    observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images")
+    observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images/detection")
     if observ_metadata and isinstance(observ_metadata, dict):
         drone_features = observ_metadata.get("features", [])
         logger.info(f"Observ metadata => {len(drone_features)} new Drone features found.")
@@ -2874,7 +2892,9 @@ def load_image(image_path, mode):
     #     except Exception as e:
     #         logger.info(f"mode 1 error due to {e}")
     elif mode == 1:  # Load the Observation of geo-referenced segmented drone image TFA-06
-        for observation in sorted(os.listdir(image_path), reverse=False):
+        # for observation in sorted(os.listdir(image_path), reverse=False):
+        for observation in sorted(os.listdir(image_path), key=lambda x: os.path.getmtime(os.path.join(image_path, x))):
+
             if observation.endswith("_Segment.tif"):
                 if 'Fire' in observation:
                     measurement_type = 'active_fire'
@@ -2884,7 +2904,7 @@ def load_image(image_path, mode):
                     measurement_type = 'Flood'
                 logger.info(f"processing segmented drone images {observation}")
                 full_path = os.path.join(image_path, observation)
-                process_observation(os.path.join(image_path, observation), 1)
+                process_observation(os.path.join(image_path, observation), 0)
                 ##############################################################
 
                 ##############################################################
@@ -3563,27 +3583,28 @@ def update_occupancy_grid_fire(OGMData, OGM_gt_,
             sensor_val = measurement_data[meas_pix[0], meas_pix[1]]  # in [0,1]
 
             # Get current probability from upsampled OGM patch.
-            prior_prob = ogm_patch_upsampled[j, i]
+            if sensor_val > 0:
+                prior_prob = ogm_patch_upsampled[j, i]
 
-            # Convert sensor value to likelihood.
-            if measurement_type == "active_fire":
-                likelihood = 0.05 + 0.9 * sensor_val
-            elif measurement_type == "burnt_area":
-                likelihood = 1.0 - 0.8 * sensor_val
-            else:
-                raise ValueError(f"Unknown measurement_type: {measurement_type}")
-            likelihood = np.clip(likelihood, 0.0, 1.0)
+                # Convert sensor value to likelihood.
+                if measurement_type == "active_fire":
+                    likelihood = 0.05 + 0.9 * sensor_val
+                elif measurement_type == "burnt_area":
+                    likelihood = 1.0 - 0.8 * sensor_val
+                else:
+                    raise ValueError(f"Unknown measurement_type: {measurement_type}")
+                likelihood = np.clip(likelihood, 0.0, 1.0)
 
-            # Log-odds update.
-            if 0 < likelihood < 1:
-                log_odds_prior = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
-                log_odds_obs = math.log((likelihood + epsilon) / (1 - likelihood + epsilon))
-                log_odds_sum = log_odds_prior + log_odds_obs
-                log_odds_clamped = np.clip(log_odds_sum, -5, 5)
-                updated_prob = 1.0 / (1.0 + np.exp(-log_odds_clamped))
-                ogm_patch_upsampled[j, i] = updated_prob
+                # Log-odds update.
+                if 0 < likelihood < 1:
+                    log_odds_prior = math.log((prior_prob + epsilon) / (1 - prior_prob + epsilon))
+                    log_odds_obs = math.log((likelihood + epsilon) / (1 - likelihood + epsilon))
+                    log_odds_sum = log_odds_prior + log_odds_obs
+                    log_odds_clamped = np.clip(log_odds_sum, -5, 5)
+                    updated_prob = 1.0 / (1.0 + np.exp(-log_odds_clamped))
+                    ogm_patch_upsampled[j, i] = updated_prob
 
-            ogm_patch_upsampled[j, i] = np.clip(ogm_patch_upsampled[j, i], 0.0, 1.0)
+                ogm_patch_upsampled[j, i] = np.clip(ogm_patch_upsampled[j, i], 0.0, 1.0)
 
     # --- 5. Downsample the fused high-resolution patch back to original OGM patch resolution ---
     orig_patch_rows, orig_patch_cols = ogm_patch.shape
