@@ -21,7 +21,12 @@ def main(natural_disaster, flag, ground_resolution):
         path = './downloads/drone_imgs/Flood/'
     elif natural_disaster == 'Fire':
         path = './downloads/drone_imgs/Fire/'
-    output_path = './georeferenced_drone_images/'
+    #################################
+    if flag=='segmented':
+        output_path = './georeferenced_drone_images/segmented/'
+    else:
+        output_path = './georeferenced_drone_images/detection/'
+
     DEM_path = f'{path}subset_dem.tif'
 
     # Parameter selection
@@ -36,9 +41,9 @@ def main(natural_disaster, flag, ground_resolution):
     the drone body coordinate system (b) as follows:
 
                                ^  Y_c = -Z_b
-                               | 
                                |
-                      __ __ __ |__ __ __ 
+                               |
+                      __ __ __ |__ __ __
                      |         |        |
                      |         |        |
                      |         |        |--------> X_c == Y_b
@@ -61,9 +66,9 @@ def main(natural_disaster, flag, ground_resolution):
     body coordinate system (b) is related to the world coordinate system (w) as follows:
 
                                ^  Y_w = X_b
-                               | 
                                |
-                               | 
+                               |
+                               |
                                |
                                |
                                |-------------> X_w == Y_b
@@ -102,7 +107,7 @@ def main(natural_disaster, flag, ground_resolution):
     file_name = 'none'
     for file in sorted(os.listdir(path), reverse=False):
         if flag == "segmented":
-            if file.endswith('.png'):
+            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
                 file_name = os.path.splitext(file)[0]
                 if file_name == 'none':
                     logger.info('Error: No .JPG nor .png files found in the specified directory.')
@@ -262,8 +267,8 @@ def run_geo(output_path, path, disaster, file_name,
             boxes_georeferencing = []
             for _ in range(len(bounding_boxes)):
                 # Find the center of mass pixel
-                cm_pixel = (int((bounding_boxes[_][1] + bounding_boxes[_][3]) / 2),
-                            int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2))
+                cm_pixel = (min(int((bounding_boxes[_][1] + bounding_boxes[_][3]) / 2), img_height - 1),
+                            min(int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2), img_width - 1))
                 image_emp[cm_pixel[0], cm_pixel[1]] = 1
 
                 georef_dic_obj = ray_tracing(terrain_model, disaster, image_emp, image_dim, camera_position,
@@ -304,7 +309,8 @@ def create_metadata(json_data):
     img_height = int(json_data['ImageHeight'])
     img_width = int(json_data['ImageWidth'])
 
-    if model == 'ZH20T':
+    dfov, hfov, vfov = None, None, None
+    if model == 'ZH20T' or model == 'M3E':
         dfov = float(json_data['FOV'].split()[0])
         hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
     elif model == 'XT2':
@@ -378,8 +384,8 @@ def calculate_dnsmp_factors(altitude, hfov, vfov, img_width, img_height, field_r
     field_h = 2 * altitude * tan(radians(vfov) / 2)
     new_img_w = field_w / field_resolution
     new_img_h = field_h / field_resolution
-    dnsmp_factor_w = int(img_width / new_img_w)
-    dnsmp_factor_h = int(img_height / new_img_h)
+    dnsmp_factor_w = max(1, int(img_width / new_img_w))
+    dnsmp_factor_h = max(1, int(img_height / new_img_h))
 
     return (dnsmp_factor_h, dnsmp_factor_w)
 
@@ -507,14 +513,15 @@ def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position
                         new_sum_idxs = lat_idx + lon_idx
 
                         # Check for intersection:
-                        if ray_alt <= dem_alt and lat_idx != -1 and lon_idx != -1:
+                        if ray_alt <= dem_alt:
                             dem_lon = dem_bounds[0][0] + (lon_idx + 0.5) * dem_res_geo[0]
                             dem_lat = dem_bounds[1][1] + (lat_idx + 0.5) * dem_res_geo[1]
 
                             # Chack the ray doesn't pass more then one cell in each step
                             if abs(new_sum_idxs - sum_idxs) != 2 or tin_step:
-                                Georef[str(i) + ',' + str(j)] = [round(item, 6) for item in
-                                                                 [ray_lon, ray_lat, dem_alt.astype(float)]]
+                                Georef[str(max(0, i)) + ',' + str(max(0, j))] = [round(item, 6) for item in
+                                                                                 [ray_lon, ray_lat,
+                                                                                  dem_alt.astype(float)]]
                                 break  # Intersection detected
                             else:
                                 R -= step
@@ -631,3 +638,4 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
     dataset.SetGeoTransform(geotransform)
 
     return image, geotransform, srs.ExportToWkt()
+
