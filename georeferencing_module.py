@@ -22,7 +22,7 @@ def main(natural_disaster, flag, ground_resolution):
     elif natural_disaster == 'Fire':
         path = './downloads/drone_imgs/Fire/'
     #################################
-    if flag=='segmented':
+    if flag == 'segmented':
         output_path = './georeferenced_drone_images/segmented/'
     else:
         output_path = './georeferenced_drone_images/detection/'
@@ -41,9 +41,9 @@ def main(natural_disaster, flag, ground_resolution):
     the drone body coordinate system (b) as follows:
 
                                ^  Y_c = -Z_b
+                               | 
                                |
-                               |
-                      __ __ __ |__ __ __
+                      __ __ __ |__ __ __ 
                      |         |        |
                      |         |        |
                      |         |        |--------> X_c == Y_b
@@ -66,9 +66,9 @@ def main(natural_disaster, flag, ground_resolution):
     body coordinate system (b) is related to the world coordinate system (w) as follows:
 
                                ^  Y_w = X_b
+                               | 
                                |
-                               |
-                               |
+                               | 
                                |
                                |
                                |-------------> X_w == Y_b
@@ -143,11 +143,10 @@ def main(natural_disaster, flag, ground_resolution):
         #         terrain_model, parallel_processing)
 
 
-def run_geo(output_path_, path, disaster, file_name,
+def run_geo(output_path, path, disaster, file_name,
             Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
             dem_res_meter,
             downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing, flag):
-
     # Inputs
     image_path = path + file_name
 
@@ -174,31 +173,41 @@ def run_geo(output_path_, path, disaster, file_name,
                 image = np.mean(image, axis=2)
             if downsampling:
                 image = downscale_local_mean(image, downsampling_factors)
-            image_dim = image.shape
+            img_height, img_width = image.shape
 
-            # Put the values of four corners and keys 1 (which is != 0) to be georeferenced in the ray-tracing function
-            image[0, 0] = image[image.shape[0] - 1, image.shape[1] - 1] = image[image.shape[0] - 1, 0] = image[
-                0, image.shape[1] - 1] = 1
+        # Create an empty image for georeferencing four corners
+        image_emp = np.zeros((img_height, img_width))
+        # Put the values of four corners as 1 (which is != 0) to be georeferenced in the ray-tracing function
+        image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[
+            0, img_width - 1] = 255.0
+        end_pixel = (img_height - 1, img_width - 1)
 
-        camera_focal_length = compute_focal_length(image_dim, fov)  # In pixels
-        start_pixel = (0, 0)
-        end_pixel = (image_dim[0] - 1, image_dim[1] - 1)
+        camera_focal_length = compute_focal_length(image.shape, fov)  # In pixels
+
+        # The corners of the empty image should be georeferenced to be used in the GEOTIFF creation
+        crn_dic = ray_tracing(terrain_model, disaster, image_emp, (img_height, img_width), camera_position,
+                              camera_orientation,
+                              Rot_b_c_fixed,
+                              Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
+                              min_elevation,
+                              dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
 
         if parallel_processing:
-            georef_dic_seg = parallel_ray_tracing(terrain_model, disaster, image, image_dim, camera_position,
+            georef_dic_seg = parallel_ray_tracing(terrain_model, disaster, image, image.shape, camera_position,
                                                   camera_orientation,
                                                   Rot_b_c_fixed, Rot_w_b_fixed, roll, camera_focal_length,
                                                   dem_elevation_data,
                                                   max_elevation, min_elevation, dem_bounds, dem_res_geo, dem_res_meter,
                                                   start_pixel, end_pixel)
         else:
-            georef_dic_seg = ray_tracing(terrain_model, disaster, image, image_dim, camera_position, camera_orientation,
+            georef_dic_seg = ray_tracing(terrain_model, disaster, image, image.shape, camera_position,
+                                         camera_orientation,
                                          Rot_b_c_fixed,
                                          Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
                                          min_elevation,
                                          dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
 
-        create_geotif(output_path_, file_name, '_Segment', image, 'none', georef_dic_seg, camera_orientation,
+        create_geotif(output_path, file_name, '_Segment', image, crn_dic, georef_dic_seg, camera_orientation,
                       coordinate_systeme)
 
         # Clean up an old temporary files
@@ -250,10 +259,9 @@ def run_geo(output_path_, path, disaster, file_name,
                             down_bounding_box.append(down_bbx)
                         bounding_boxes = down_bounding_box
             image_emp = np.zeros((img_height, img_width))
-            image_dim = (img_height, img_width)
             # Put the values of four corners as 1 (which is != 0) to be georeferenced in the ray-tracing function
             image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[
-                0, img_width - 1] = 1
+                0, img_width - 1] = 255.0
 
             end_pixel = (img_height - 1, img_width - 1)
 
@@ -272,7 +280,8 @@ def run_geo(output_path_, path, disaster, file_name,
                             min(int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2), img_width - 1))
                 image_emp[cm_pixel[0], cm_pixel[1]] = 1
 
-                georef_dic_obj = ray_tracing(terrain_model, disaster, image_emp, image_dim, camera_position,
+                georef_dic_obj = ray_tracing(terrain_model, disaster, image_emp, (img_height, img_width),
+                                             camera_position,
                                              camera_orientation, Rot_b_c_fixed,
                                              Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data,
                                              max_elevation,
@@ -283,7 +292,7 @@ def run_geo(output_path_, path, disaster, file_name,
                 georef_dic_obj['label'] = labels[_]
                 boxes_georeferencing.append(georef_dic_obj)
 
-            create_geotif(output_path_, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
+            create_geotif(output_path, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
                           camera_orientation,
                           coordinate_systeme)
 
@@ -522,7 +531,8 @@ def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position
                             if abs(new_sum_idxs - sum_idxs) != 2 or tin_step:
                                 Georef[str(max(0, i)) + ',' + str(max(0, j))] = [round(item, 6) for item in
                                                                                  [ray_lon, ray_lat,
-                                                                                  dem_alt.astype(float)]]
+                                                                                  dem_alt.astype(float),
+                                                                                  image[i, j] / 255.0]]
                                 break  # Intersection detected
                             else:
                                 R -= step
@@ -586,8 +596,8 @@ def parallel_ray_tracing(terrain_type, disaster, image, image_dimensions, camera
 def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camera_orientation, coordinate_system):
     img_height, img_width = image.shape
     orig_dic = crn_dic
-    if crn_dic == 'none': orig_dic = georef_data
 
+    #############################################################
     if subject == '_Segment':
         if 'Burnt' in file_name:
             output += 'burnt/'
@@ -597,6 +607,7 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
             output += 'flood/'
     elif subject == '_Objects':
         pass
+    #############################################################
 
     # Create a new GeoTIFF file
     driver = gdal.GetDriverByName('GTiff')
