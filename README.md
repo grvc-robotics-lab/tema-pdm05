@@ -73,3 +73,30 @@ docker run -it -p 5505:5505 \
   -e API_ENDPOINT="notify" \
   ghcr.io/he-tema/inf_fusion_v02
 ```
+'''
+docker run -it -p 5505:5505 \
+  -e HOST="0.0.0.0" \
+  -e PORT="5505" \
+  -e DEBUG="True" \
+  -e BROKER_URL="https://orion.tema.digital-enabler.eng.it" \
+  -e BROKER_ENTITY_Maps4Flood_ID="urn:ngsi-ld:USE:PDM-05:Maps4Flood:01" \
+  -e BROKER_ENTITY_Maps4Fire_ID="urn:ngsi-ld:USE:PDM-05:Maps4Fire:01" \
+  -e BROKER_ENTITY_Maps4Object_ID="urn:ngsi-ld:USE:PDM-05:Maps4Object:01" \
+  -e BROKER_TYPE_ID="GeoTIFF" \
+  -e BROKER_SUBSCRIPTION_ID="subscription123" \
+  -e MINIO_ENDPOINT="storage.tema.digital-enabler.eng.it:443" \
+  -e MINIO_ACCESS_KEY="AUMFK4CGDFORW7PC9URA" \
+  -e MINIO_SECRET_KEY="v9L6zs+G8Qu0UKgfMi8FNIncXtZ+ASMJrAXQwpTB" \
+  -e OBJECT_NAME="estimated_ogm_ND.tif" \
+  -e BUCKET_NAME="use" \
+  -e PROCESSING_UNIT="cpus" \
+  -e PUBLIC_IP_ADDRESS="tema-project.ddns.net" \
+  -e BASE_PATH="/pdm05/" \
+  -e API_ENDPOINT="/notify/" \
+  -e OpenTopography_api_key="56da0f69ae202d4d9414278b0f6537bd" \
+  -e OGM_OBJ_RESOLUTION="20" \
+  -e OGM_ND_RESOLUTION="20" \
+  -e SCALING_FACTOR="1" \
+  docker pull ghcr.io/he-tema/inf_fusion_v02:6.03
+
+'''

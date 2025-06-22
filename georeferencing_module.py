@@ -16,7 +16,6 @@ output_path = None
 
 def main(natural_disaster, flag, ground_resolution):
     global path, output_path
-    disaster = natural_disaster
     if natural_disaster == 'Flood':
         path = './downloads/drone_imgs/Flood/'
     elif natural_disaster == 'Fire':
@@ -113,11 +112,11 @@ def main(natural_disaster, flag, ground_resolution):
                     logger.info('Error: No .JPG nor .png files found in the specified directory.')
                     return
                 else:
-                    run_geo(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
+                    run_geo(output_path, path, flag, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
                             max_elevation,
                             min_elevation, dem_bounds,
                             dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
-                            terrain_model, parallel_processing, flag)
+                            terrain_model, parallel_processing)
 
         elif flag == "bbox":
             if file.endswith('_obj.json'):
@@ -126,11 +125,11 @@ def main(natural_disaster, flag, ground_resolution):
                     logger.info('Error: No .JPG nor .png files found in the specified directory.')
                     return
                 else:
-                    run_geo(output_path, path, disaster, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
+                    run_geo(output_path, path, flag, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
                             max_elevation,
                             min_elevation, dem_bounds,
                             dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
-                            terrain_model, parallel_processing, flag)
+                            terrain_model, parallel_processing)
 
         #         break
         # if file_name == 'none':
@@ -143,10 +142,10 @@ def main(natural_disaster, flag, ground_resolution):
         #         terrain_model, parallel_processing)
 
 
-def run_geo(output_path, path, disaster, file_name,
+def run_geo(output_path, path, flag, file_name,
             Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
             dem_res_meter,
-            downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing, flag):
+            downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing):
     # Inputs
     image_path = path + file_name
 
@@ -161,7 +160,7 @@ def run_geo(output_path, path, disaster, file_name,
         metadata = create_metadata(original_metadata)
         camera_position = [value for key, value in metadata['drone_location'].items()]
         camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
-        fov = metadata['camera_parameters']['fov']
+        fov = metadata.get('camera_parameters').get('fov')
         imag_width = metadata['camera_parameters']['width']
         imag_height = metadata['camera_parameters']['height']
         downsampling_factors = calculate_dnsmp_factors(camera_position[3], fov[1], fov[2], imag_width, imag_height,
@@ -185,7 +184,7 @@ def run_geo(output_path, path, disaster, file_name,
         camera_focal_length = compute_focal_length(image.shape, fov)  # In pixels
 
         # The corners of the empty image should be georeferenced to be used in the GEOTIFF creation
-        crn_dic = ray_tracing(terrain_model, disaster, image_emp, (img_height, img_width), camera_position,
+        crn_dic = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width), camera_position,
                               camera_orientation,
                               Rot_b_c_fixed,
                               Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
@@ -193,14 +192,14 @@ def run_geo(output_path, path, disaster, file_name,
                               dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
 
         if parallel_processing:
-            georef_dic_seg = parallel_ray_tracing(terrain_model, disaster, image, image.shape, camera_position,
+            georef_dic_seg = parallel_ray_tracing(terrain_model, flag, image, image.shape, camera_position,
                                                   camera_orientation,
                                                   Rot_b_c_fixed, Rot_w_b_fixed, roll, camera_focal_length,
                                                   dem_elevation_data,
                                                   max_elevation, min_elevation, dem_bounds, dem_res_geo, dem_res_meter,
                                                   start_pixel, end_pixel)
         else:
-            georef_dic_seg = ray_tracing(terrain_model, disaster, image, image.shape, camera_position,
+            georef_dic_seg = ray_tracing(terrain_model, flag, image, image.shape, camera_position,
                                          camera_orientation,
                                          Rot_b_c_fixed,
                                          Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
@@ -266,7 +265,7 @@ def run_geo(output_path, path, disaster, file_name,
             end_pixel = (img_height - 1, img_width - 1)
 
             # The corners of the empty image should be georeferenced to be used in the GEOTIFF creation
-            crn_dic = ray_tracing(terrain_model, disaster, image_emp, (img_height, img_width), camera_position,
+            crn_dic = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width), camera_position,
                                   camera_orientation,
                                   Rot_b_c_fixed,
                                   Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
@@ -280,7 +279,7 @@ def run_geo(output_path, path, disaster, file_name,
                             min(int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2), img_width - 1))
                 image_emp[cm_pixel[0], cm_pixel[1]] = 1
 
-                georef_dic_obj = ray_tracing(terrain_model, disaster, image_emp, (img_height, img_width),
+                georef_dic_obj = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width),
                                              camera_position,
                                              camera_orientation, Rot_b_c_fixed,
                                              Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data,
@@ -301,33 +300,44 @@ def run_geo(output_path, path, disaster, file_name,
             os.remove(object_metadata_file)
 
 
-def create_metadata(json_data):
+def create_metadata(json_data, takeoff_elev = 960):
     '''
     This function returns camera position, orientation, and field of view by reading
     the image metadata
+    Camera Model Name
     '''
-    model = json_data['Model']
+    model = json_data.get('Model', 'Camera Model Name ')
     lon_dms = json_data['GPSLongitude'].split()
     camera_lon = dms_to_decimal(lon_dms[0], lon_dms[2][:-1], lon_dms[3][:-2], lon_dms[4])
     lat_dms = json_data['GPSLatitude'].split()
     camera_lat = dms_to_decimal(lat_dms[0], lat_dms[2][:-1], lat_dms[3][:-2], lat_dms[4])
-    camera_alt = float(json_data['GPSAltitude'].split()[0])
     camera_alt_rel = float(json_data['RelativeAltitude'])
+    camera_alt = takeoff_elev + camera_alt_rel
     gimbal_roll = radians(float(json_data['GimbalRollDegree']))
     gimbal_pitch = radians(float(json_data['GimbalPitchDegree']))
-    gimbal_yaw = radians(float(json_data['GimbalYawDegree']))
+    gimbal_yaw = radians((360.0 + float(json_data['GimbalYawDegree'])) % 360)
     img_height = int(json_data['ImageHeight'])
     img_width = int(json_data['ImageWidth'])
 
+    modality = json_data.get('Modality')
+
     dfov, hfov, vfov = None, None, None
-    if model == 'ZH20T' or model == 'M3E':
-        dfov = float(json_data['FOV'].split()[0])
-        hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
+    if model == 'ZH20T' or model == 'M3E' or model == 'FC2403':
+        if modality=='IR':
+            dfov = 63.8
+            hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
+        else:
+            dfov = float(json_data.get('FOV').split()[0])
+            hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
     elif model == 'XT2':
         hfov, vfov = (57.12, 42.44)
         dfov = calculate_dfov(hfov, vfov)
     elif model == 'ZENMUSE Z30':
         dfov = 63.7
+        hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
+        #
+    elif model == 'L2D-20c':
+        dfov = float(json_data.get('FOV').split()[0])
         hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
     FOV = (dfov, hfov, vfov)
     ImageMetadata = {
@@ -338,8 +348,6 @@ def create_metadata(json_data):
     }
 
     return ImageMetadata
-
-
 def dms_to_decimal(degrees, minutes, seconds, direction):
     '''
     This function converts degrees, minutes, seconds to decimal degrees
@@ -390,6 +398,8 @@ def calculate_hv_fov(dfov, w, h):
 
 
 def calculate_dnsmp_factors(altitude, hfov, vfov, img_width, img_height, field_resolution):
+    logger.info(f"HFOV ---> {hfov}")
+    logger.info(f"VFOV ---> {vfov}")
     field_w = 2 * altitude * tan(radians(hfov) / 2)
     field_h = 2 * altitude * tan(radians(vfov) / 2)
     new_img_w = field_w / field_resolution
@@ -469,7 +479,7 @@ def lon_or_lat_to_meter(origin_lat, displacement, direction):
         return r_earth * displacement * (pi / 180)
 
 
-def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position, camera_orientation, Rot_b_c_fixed,
+def ray_tracing(terrain_type, flag, image, image_dimensions, camera_position, camera_orientation, Rot_b_c_fixed,
                 Rot_w_b_fixed, roll, focal_length, dem_elevation_data, max_elevation, min_elevation, dem_bounds,
                 dem_res_geo, dem_res_meter, start_pixel, end_pixel, camera_range=2000, epsilon=0.001):
     # Rotation from world to camera:
@@ -503,7 +513,7 @@ def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position
                     base_step = np.min(abs(dem_res_meter / (r_dir[:2] + 0.0001)))
                     tin_step = False
                     sum_idxs = 0  # For chacking the ray doesn't pass more then one cell in each step
-                    while R < camera_range:
+                    while R < camera_range + 2 * base_step:
                         ray_lon, ray_lat = meterTo_lon_lat(R * r_dir[0], R * r_dir[1], camera_position[0],
                                                            camera_position[1])
                         ray_alt = camera_position[2] + R * r_dir[2]
@@ -523,7 +533,7 @@ def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position
                         new_sum_idxs = lat_idx + lon_idx
 
                         # Check for intersection:
-                        if ray_alt <= dem_alt:
+                        if ray_alt <= dem_alt or R >= camera_range:
                             dem_lon = dem_bounds[0][0] + (lon_idx + 0.5) * dem_res_geo[0]
                             dem_lat = dem_bounds[1][1] + (lat_idx + 0.5) * dem_res_geo[1]
 
@@ -531,8 +541,10 @@ def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position
                             if abs(new_sum_idxs - sum_idxs) != 2 or tin_step:
                                 Georef[str(max(0, i)) + ',' + str(max(0, j))] = [round(item, 6) for item in
                                                                                  [ray_lon, ray_lat,
-                                                                                  dem_alt.astype(float),
-                                                                                  image[i, j] / 255.0]]
+                                                                                  dem_alt.astype(float)]]
+                                if flag == 'segmented':
+                                    Georef[str(max(0, i)) + ',' + str(max(0, j))].append(round(image[i, j] / 255.0, 6))
+
                                 break  # Intersection detected
                             else:
                                 R -= step
@@ -545,18 +557,18 @@ def ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position
     return Georef
 
 
-def process_chunk(terrain_type, disaster, image, image_dimensions, camera_position, camera_orientation,
+def process_chunk(terrain_type, flag, image, image_dimensions, camera_position, camera_orientation,
                   Rot_b_c_fixed, Rot_w_b_fixed, roll, focal_length, dem_elevation_data, max_elevation,
                   min_elevation, dem_bounds, dem_res_geo, dem_res_meter, chunk_start_pixel, chunk_end_pixel,
                   camera_range=2000, epsilon=0.001):
     """This function processes a subset (chunk) of the image."""
-    return ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position, camera_orientation,
+    return ray_tracing(terrain_type, flag, image, image_dimensions, camera_position, camera_orientation,
                        Rot_b_c_fixed, Rot_w_b_fixed, roll, focal_length, dem_elevation_data, max_elevation,
                        min_elevation, dem_bounds, dem_res_geo, dem_res_meter, chunk_start_pixel, chunk_end_pixel,
                        camera_range, epsilon)
 
 
-def parallel_ray_tracing(terrain_type, disaster, image, image_dimensions, camera_position, camera_orientation,
+def parallel_ray_tracing(terrain_type, flag, image, image_dimensions, camera_position, camera_orientation,
                          Rot_b_c_fixed, Rot_w_b_fixed, roll, focal_length, dem_elevation_data, max_elevation,
                          min_elevation, dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel,
                          camera_range=2000, epsilon=0.001, n_chunks=multiprocessing.cpu_count()):
@@ -578,7 +590,7 @@ def parallel_ray_tracing(terrain_type, disaster, image, image_dimensions, camera
     georef = {}
     with ProcessPoolExecutor() as executor:
         futures = [
-            executor.submit(process_chunk, terrain_type, disaster, image, image_dimensions, camera_position,
+            executor.submit(process_chunk, terrain_type, flag, image, image_dimensions, camera_position,
                             camera_orientation, Rot_b_c_fixed, Rot_w_b_fixed, roll, focal_length,
                             dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
                             dem_res_meter, chunk_start, chunk_end, camera_range, epsilon)
@@ -595,7 +607,6 @@ def parallel_ray_tracing(terrain_type, disaster, image, image_dimensions, camera
 
 def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camera_orientation, coordinate_system):
     img_height, img_width = image.shape
-    orig_dic = crn_dic
 
     #############################################################
     if subject == '_Segment':
@@ -635,19 +646,19 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
     sin_rotation = sin(rotation)
 
     if coordinate_system == 4326:
-        tl_lon, tl_lat = orig_dic['0,0'][:2]
-        tr_lon, tr_lat = orig_dic['0,' + str(img_width - 1)][:2]
-        bl_lon, bl_lat = orig_dic[str(img_height - 1) + ',0'][:2]
+        tl_lon, tl_lat = crn_dic['0,0'][:2]
+        tr_lon, tr_lat = crn_dic['0,' + str(img_width - 1)][:2]
+        bl_lon, bl_lat = crn_dic[str(img_height - 1) + ',0'][:2]
 
     elif coordinate_system == 3857:
-        tl_lon, tl_lat = Transformer.from_crs("EPSG:4326", "EPSG:3857").transform(orig_dic['0,0'][1],
-                                                                                  orig_dic['0,0'][0])
+        tl_lon, tl_lat = Transformer.from_crs("EPSG:4326", "EPSG:3857").transform(crn_dic['0,0'][1],
+                                                                                  crn_dic['0,0'][0])
         tr_lon, tr_lat = Transformer.from_crs("EPSG:4326", "EPSG:3857").transform(
-            orig_dic['0,' + str(img_width - 1)][1],
-            orig_dic['0,' + str(img_width - 1)][0])
+            crn_dic['0,' + str(img_width - 1)][1],
+            crn_dic['0,' + str(img_width - 1)][0])
         bl_lon, bl_lat = Transformer.from_crs("EPSG:4326", "EPSG:3857").transform(
-            orig_dic[str(img_height - 1) + ',0'][1],
-            orig_dic[str(img_height - 1) + ',0'][0])
+            crn_dic[str(img_height - 1) + ',0'][1],
+            crn_dic[str(img_height - 1) + ',0'][0])
 
     delta_x = sqrt((tl_lon - tr_lon) ** 2 + (tl_lat - tr_lat) ** 2)
     delta_y = sqrt((tl_lon - bl_lon) ** 2 + (tl_lat - bl_lat) ** 2)
@@ -661,3 +672,5 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
 
     return image, geotransform, srs.ExportToWkt()
 
+#if __name__ == "__main__":
+#    main('Fire', 'segmented', 0.04)
