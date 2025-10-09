@@ -1,10 +1,24 @@
 
 *.pyc
-/__pycache__
-__pycache__/config.cpython-39.pyc
-__pycache__/Kalman_filter_estimating_Objects.cpython-39.pyc
-__pycache__/logging_config.cpython-39.pyc
-__pycache__/minio_client.cpython-39.pyc
-__pycache__/routes.cpython-39.pyc
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
 app_routes.log
-estimated_OGM/occupancy_grid_map_Fire.tif
+downloads/
+estimated_OGM/
+segmented_sat_roi_imgs/
+georeferenced_drone_images/
+Satellite_DLR/
+*.tif.aux.xml
+*.jp2
+*.gpkg
+*.SAFE/
+subset_dem*.tif
+temp_*.tif
+*.tmp
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
