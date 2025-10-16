@@ -1,10 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
 
-*.pyc
-/__pycache__
-__pycache__/config.cpython-39.pyc
-__pycache__/Kalman_filter_estimating_Objects.cpython-39.pyc
-__pycache__/logging_config.cpython-39.pyc
-__pycache__/minio_client.cpython-39.pyc
-__pycache__/routes.cpython-39.pyc
+# Virtual envs (generic)
+.venv/
+venv/
+env/
+ENV/
+
+# Your env folder (ignore only venv-like parts so real code named IF_module won’t be ignored)
+IF_module/bin/
+IF_module/lib/
+IF_module/include/
+IF_module/pyvenv.cfg
+IF_module/Lib/
+IF_module/Scripts/
+IF_module/Include/
+IF_module/share/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
 app_routes.log
-estimated_OGM/occupancy_grid_map_Fire.tif
+
+# Env / secrets
+.env
+.env.*
+env_vars.txt
+
+# Data / outputs
+downloads/
+estimated_OGM/
+
+# Geospatial sidecars
+*.aux.xml
+*.tif.aux.xml
+
+# Jupyter
+.ipynb_checkpoints/
+
