@@ -1,426 +1,151 @@
 import requests
-from datetime import datetime, timezone
+import json
+import hashlib
+from datetime import datetime, timedelta, timezone
 
-import requests
-import uuid
+# ---------------------------------------------------------------------------
+# Constants & helpers
+# ---------------------------------------------------------------------------
+LD_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/ld+json",
+    "Link": (
+        "<https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.6.jsonld>; "
+        'rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"'
+    ),
+}
 
-def create_entity():
-    url = 'https://orion.tema.digital-enabler.eng.it/ngsi-ld/v1/entities'
-    headers = {
-        'Content-Type': 'application/ld+json',
-        'Accept': 'application/ld+json'
-    }
+# New polygon coordinates
+NEW_POLYGON = [
+    [23.479676024, 38.787963173],
+    [23.483924327, 38.79507817],
+    [23.482363555, 38.799262473],
+    [23.47958039, 38.803064276],
+    [23.47073523, 38.801801291],
+    [23.470068075, 38.79860237],
+    [23.470787545, 38.795830983],
+    [23.471388948, 38.792343556],
+    [23.473816704, 38.789951543],
+    [23.479676024, 38.787963173],  # close ring
+]
 
-    entity_id = f"urn:ngsi-ld:Alert:{uuid.uuid4()}"
-    print(f"entity_id ---- {entity_id}")
-    data = {
-        "@context": [
-            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"
-        ],
+
+def utc_now_iso() -> str:
+    """Return the current UTC time in ISO‑8601 (ms precision, Z suffix)."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------------------
+# Entity builders
+# ---------------------------------------------------------------------------
+
+def create_alert_entity(orion_url: str, entity_id: str):
+    """Create an NGSI‑LD Alert entity with the new polygon."""
+    bm_id_hash = hashlib.md5(entity_id.encode("utf-8")).hexdigest()
+    sent_ts = utc_now_iso()
+    expires_ts = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    entity = {
         "id": entity_id,
         "type": "Alert",
         "area": {
             "type": "GeoProperty",
-            "value": {
-                "coordinates": [
-                    [
-                        [6.996817324763098, 50.52179311595503],
-                        [6.982379621684984, 50.51775574602705],
-                        [6.9760852934997, 50.51352671178176],
-                        [6.980425116279783, 50.50646969878611],
-                        [6.9958785266122, 50.51139813782763],
-                        [6.996817324763098, 50.52179311595503]
-                    ]
-                ],
-                "type": "Polygon"
-            }
+            "value": {"type": "Polygon", "coordinates": [NEW_POLYGON]},
         },
-        "areaDesc": {
-            "type": "Property",
-            "value": "TEMA Pilot exercise"
-        },
-        "bm_id": {
-            "type": "Property",
-            "value": "1dd6022df507af26f9388f2125564767"
-        },
-        "category": {
-            "type": "Property",
-            "value": "Met"
-        },
-        "certainty": {
-            "type": "Property",
-            "value": "Observed"
-        },
-        "effective": {
-            "type": "Property",
-            "value": "2025-02-12T14:40:35.727Z"
-        },
-        "event": {
-            "type": "Property",
-            "value": "Flood"
-        },
-        "expires": {
-            "type": "Property",
-            "value": "2025-12-31T10:57:55.325Z"
-        },
-        "msgType": {
-            "type": "Property",
-            "value": "Alert"
-        },
-        "scope": {
-            "type": "Property",
-            "value": "Private"
-        },
-        "sender": {
-            "type": "Property",
-            "value": "alert@tema-project.eu"
-        },
-        "sent": {
-            "type": "Property",
-            "value": "2025-02-12T14:40:35.727Z"
-        },
-        "severity": {
-            "type": "Property",
-            "value": "Severe"
-        },
-        "status": {
-            "type": "Property",
-            "value": "Exercise"
-        },
-        "urgency": {
-            "type": "Property",
-            "value": "Immediate"
-        }
-    }
-
-    # Sending request
-    response_ = requests.post(url, json=data, headers=headers)
-
-    # Handling response
-    if response_.status_code == 201:
-        print("Entity created successfully.")
-    elif response_.status_code == 409:
-        print("Entity already exists.")
-    else:
-        print(f"Failed to create entity: {response_.status_code} - {response_.text}")
-
-    return response_
-
-# def create_entity():
-#     url = 'https://orion.tema.digital-enabler.eng.it/ngsi-ld/v1/entities'
-#     headers = {
-#         'Content-Type': 'application/ld+json',
-#         'Accept': 'application/ld+json'
-#     }
-#
-#     data = {
-#         # "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
-#         "@context": [
-#             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"
-#         ],
-#         "id": "urn:ngsi-ld:Alert:2025-02-12T15:40:35.727-e38f2abb-12fa-4d83-9c6d-7c7405fb2717",
-#         "type": "Alert",
-#         "area": {
-#             "type": "GeoProperty",
-#             "value": {
-#                 "coordinates":
-#                     [
-#                         [
-#                             [6.996817324763098, 50.52179311595503],
-#                             [6.982379621684984, 50.51775574602705],
-#                             [6.9760852934997, 50.51352671178176],
-#                             [6.980425116279783, 50.50646969878611],
-#                             [6.9958785266122, 50.51139813782763],
-#                             [6.996817324763098, 50.52179311595503]
-#                         ]
-#                     ],
-#
-#                 "type": "Polygon"
-#             }
-#         },
-#         "areaDesc": {
-#             "type": "Property",
-#             "value": "TEMA Pilot exercise"
-#         },
-#         "bm_id": {
-#             "type": "Property",
-#             "value": "1dd6022df507af26f9388f2125564767"
-#         },
-#         "category": {
-#             "type": "Property",
-#             "value": "Met"
-#         },
-#         "certainty": {
-#             "type": "Property",
-#             "value": "Observed"
-#         },
-#         "effective": {
-#             "type": "Property",
-#             "value": "2025-02-12T14:40:35.727Z"
-#         },
-#         "event": {
-#             "type": "Property",
-#             "value": "Flood"
-#         },
-#         "expires": {
-#             "type": "Property",
-#             "value": "2025-12-31T10:57:55.325Z"
-#         },
-#         "location": {
-#             "type": "GeoProperty",
-#             "value": {
-#                                 "coordinates":
-#                     [
-#                         [
-#                             [6.996817324763098, 50.52179311595503],
-#                             [6.982379621684984, 50.51775574602705],
-#                             [6.9760852934997, 50.51352671178176],
-#                             [6.980425116279783, 50.50646969878611],
-#                             [6.9958785266122, 50.51139813782763],
-#                             [6.996817324763098, 50.52179311595503]
-#                         ]
-#                     ],
-#
-#                 "type": "Polygon"
-#             }
-#         },
-#         "msgType": {
-#             "type": "Property",
-#             "value": "Alert"
-#         },
-#         "scope": {
-#             "type": "Property",
-#             "value": "Private"
-#         },
-#         "sender": {
-#             "type": "Property",
-#             "value": "alert@tema-project.eu"
-#         },
-#         "sent": {
-#             "type": "Property",
-#             "value": "2025-02-12T14:40:35.727Z"
-#         },
-#         "severity": {
-#             "type": "Property",
-#             "value": "Severe"
-#         },
-#         "status": {
-#             "type": "Property",
-#             "value": "Exercise"
-#         },
-#         "urgency": {
-#             "type": "Property",
-#             "value": "Immediate"
-#         }
-#     }
-#
-#     response_ = requests.post(url, json=data, headers=headers)
-#
-#     if response_.status_code == 201:
-#         print("Entity created successfully.")
-#         return response_
-#     elif response_.status_code == 409:
-#         print("Entity already exists.")
-#         return {"status": "Entity already exists"}, 409
-#     else:
-#         print(f"Failed to create entity: {response_.status_code} - {response_.text}")
-#         return {"status": "Error"}, 500
-
-
-# def update_entity(entity_id_):
-#     url_ = f'https://orion.tema.digital-enabler.eng.it/ngsi-ld/v1/entities/{entity_id_}/attrs'
-#     headers = {
-#         'Content-Type': 'application/ld+json',
-#         'Accept': 'application/ld+json'
-#     }
-#
-#     payload = {
-#         "area": {
-#             "type": "GeoProperty",
-#             "value": {
-#                                 "coordinates":
-#                     [
-#                         [
-#                             [6.996817324763098, 50.52179311595503],
-#                             [6.982379621684984, 50.51775574602705],
-#                             [6.9760852934997, 50.51352671178176],
-#                             [6.980425116279783, 50.50646969878611],
-#                             [6.9958785266122, 50.51139813782763],
-#                             [6.996817324763098, 50.52179311595503]
-#                         ]
-#                     ],
-#
-#                 "type": "Polygon"
-#             }
-#         },
-#         "expires": {
-#             "type": "Property",
-#             "value": "2025-09-12T14:40:35.727Z"
-#         },
-#         "location": {
-#             "type": "GeoProperty",
-#             "value": {
-#                                 "coordinates":
-#                     [
-#                         [
-#                             [6.996817324763098, 50.52179311595503],
-#                             [6.982379621684984, 50.51775574602705],
-#                             [6.9760852934997, 50.51352671178176],
-#                             [6.980425116279783, 50.50646969878611],
-#                             [6.9958785266122, 50.51139813782763],
-#                             [6.996817324763098, 50.52179311595503],
-#                         ]
-#                     ],
-#
-#                 "type": "Polygon"
-#             }
-#         },
-#         "msgType": {
-#             "type": "Property",
-#             "value": "Alert"
-#         },
-#         "scope": {
-#             "type": "Property",
-#             "value": "Private"
-#         },
-#         "sender": {
-#             "type": "Property",
-#             "value": "alert@tema-project.eu"
-#         },
-#         "sent": {
-#             "type": "Property",
-#             "value": datetime.now(timezone.utc).isoformat()
-#         },
-#         "severity": {
-#             "type": "Property",
-#             "value": "Severe"
-#         },
-#         "status": {
-#             "type": "Property",
-#             "value": "Exercise"
-#         },
-#         "urgency": {
-#             "type": "Property",
-#             "value": "Immediate"
-#         }
-#     }
-#
-#     payload_with_context = {
-#         "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
-#         **payload
-#     }
-#
-#     try:
-#         response = requests.post(url_, json=payload_with_context, headers=headers, timeout=60)
-#         response.raise_for_status()
-#         print(f"Entity {entity_id_} updated successfully!")
-#         return response
-#
-#     except requests.exceptions.HTTPError as e:
-#         print(f"HTTP error occurred while updating entity {entity_id_}: {e}. Response text: {response.text}")
-#     except requests.exceptions.RequestException as e:
-#         print(f"Error occurred while updating entity {entity_id_}: {e}")
-#
-#     return None
-import requests
-from datetime import datetime, timezone
-
-
-def update_entity(entity_id_):
-    url_ = f'https://orion.tema.digital-enabler.eng.it/ngsi-ld/v1/entities/{entity_id_}/attrs'
-    headers = {
-        'Content-Type': 'application/ld+json',
-        'Accept': 'application/ld+json'
-    }
-
-    payload = {
-        "area": {
+        "areaDesc": {"type": "Property", "value": "Seville trial polygon"},
+        "bm_id": {"type": "Property", "value": bm_id_hash},
+        "category": {"type": "Property", "value": "Safety"},
+        "certainty": {"type": "Property", "value": "Observed"},
+        "effective": {"type": "Property", "value": sent_ts},
+        "event": {"type": "Property", "value": "Flood"},
+        "expires": {"type": "Property", "value": expires_ts},
+        "ignitionPoints": {
             "type": "GeoProperty",
-            "value": {
-                "coordinates": [
-                    [
-                        [6.996817324763098, 50.52179311595503],
-                        [6.982379621684984, 50.51775574602705],
-                        [6.9760852934997, 50.51352671178176],
-                        [6.980425116279783, 50.50646969878611],
-                        [6.9958785266122, 50.51139813782763],
-                        [6.996817324763098, 50.52179311595503]
-                    ]
-                ],
-                "type": "Polygon"
-            }
+            "value": {"type": "Point", "coordinates": [-5.99823, 37.42509]},  # update if needed
         },
+        "msgType": {"type": "Property", "value": "Alert"},
+        "sender": {"type": "Property", "value": "alert@tema-project.eu"},
+        "sent": {"type": "Property", "value": sent_ts},
+        "severity": {"type": "Property", "value": "Severe"},
+        "urgency": {"type": "Property", "value": "Immediate"},
+        "status": {"type": "Property", "value": "Exercise"},
         "location": {
             "type": "GeoProperty",
+            "value": {"type": "Polygon", "coordinates": [NEW_POLYGON]},
+        },
+        "scope": {"type": "Property", "value": "Private"},
+    }
+
+    response = requests.post(f"{orion_url}/ngsi-ld/v1/entities", headers=LD_HEADERS, json=entity, timeout=10)
+    response.raise_for_status()
+    return response
+
+
+def create_ground_sensor_stats_entity(orion_url: str, id_date: str, date_modified: datetime | None = None):
+    """Create a GroundSensorStats entity that uses the same polygon for the AOI."""
+    date_modified = date_modified or datetime.now(timezone.utc)
+
+    entity_id = f"urn:ngsi-ld:tema:DLR-KN:SummaryStatistics:GroundSensorStats:{id_date}"
+    fname_value = f"{entity_id}.hdf5"
+
+    entity = {
+        "id": entity_id,
+        "type": "GroundSensorStats",
+        "description": {
+            "type": "Property",
+            "value": "NetCDF file containing sensor measurements from TEMA ground stations.",
+        },
+        "title": {"type": "Property", "value": "Summary Statistics for Flood Campaign"},
+        "aoi": {
+            "type": "Property",
             "value": {
-                "coordinates": [
-                    [
-                        [6.996817324763098, 50.52179311595503],
-                        [6.982379621684984, 50.51775574602705],
-                        [6.9760852934997, 50.51352671178176],
-                        [6.980425116279783, 50.50646969878611],
-                        [6.9958785266122, 50.51139813782763],
-                        [6.996817324763098, 50.52179311595503]
-                    ]
-                ],
-                "type": "Polygon"
-            }
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [NEW_POLYGON],
+                },
+                "properties": {"description": "Polygon enclosing all points"},
+            },
         },
-        "expires": {
+        "bm_id": {"type": "Property", "value": id_date},
+        "bucket": {"type": "Property", "value": "dlr"},
+        "date": {"type": "Property", "value": utc_now_iso()},
+        "dateModified": {
             "type": "Property",
-            "value": "2025-09-12T14:40:35.727Z"
+            "value": date_modified.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         },
-        "msgType": {
+        "file_name": {
             "type": "Property",
-            "value": "Alert"
+            "value": "kn/summary_stats/sim_kahy_dataset.hdf5",
         },
-        "scope": {
+        "fname": {"type": "Property", "value": fname_value},
+        "minio_url": {
             "type": "Property",
-            "value": "Private"
+            "value": "storage.tema.digital-enabler.eng.it/dlr/kn/summary_stats/sim_kahy_dataset.hdf5",
         },
-        "sender": {
-            "type": "Property",
-            "value": "alert@tema-project.eu"
-        },
-        "sent": {
-            "type": "Property",
-            "value": datetime.now(timezone.utc).isoformat()
-        },
-        "severity": {
-            "type": "Property",
-            "value": "Severe"
-        },
-        "status": {
-            "type": "Property",
-            "value": "Exercise"
-        },
-        "urgency": {
-            "type": "Property",
-            "value": "Immediate"
-        }
     }
 
-    payload_with_context = {
-        "@context": ["https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"],
-        # Ensuring correct NGSI-LD context format
-        **payload
-    }
-
-    try:
-        response = requests.post(url_, json=payload_with_context, headers=headers, timeout=60)
-        response.raise_for_status()
-        print(f"✅ Entity {entity_id_} updated successfully!")
-        return response.json()
-
-    except requests.exceptions.HTTPError as e:
-        print(f"❌ HTTP error while updating entity {entity_id_}: {e}. Response: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Request error while updating entity {entity_id_}: {e}")
-
-    return None
+    response = requests.post(f"{orion_url}/ngsi-ld/v1/entities", headers=LD_HEADERS, json=entity, timeout=10)
+    response.raise_for_status()
+    return response
 
 
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # create_entity()
-    update_entity("urn:ngsi-ld:Alert:c21f1c93-9392-452f-9ca6-42f2b78e2b87")
+    ORION_URL = "https://orion.tema.digital-enabler.eng.it"
 
+    # Use a new unique ID with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    ALERT_ENTITY_ID = f"urn:ngsi-ld:Alert:test{timestamp}:greece:106"
+
+    alert_hash = hashlib.md5(ALERT_ENTITY_ID.encode("utf-8")).hexdigest()
+    alert_resp = create_alert_entity(ORION_URL, ALERT_ENTITY_ID)
+    print(f"✅ Alert created → {alert_resp.status_code}")
+
+    # --------------------------------------------------------------------
+    # 2) Create GroundSensorStats entity
+    # --------------------------------------------------------------------
+    stats_resp = create_ground_sensor_stats_entity(ORION_URL, id_date=alert_hash)
+    print(f"✅ GroundSensorStats created → {stats_resp.status_code}")

@@ -51,6 +51,9 @@ ENTITY_Maps4Flood_ID = os.getenv("BROKER_ENTITY_Maps4Flood_ID")
 ENTITY_Maps4Fire_ID = os.getenv("BROKER_ENTITY_Maps4Fire_ID")
 ENTITY_Maps4Object_ID = os.getenv("BROKER_ENTITY_Maps4Object_ID")
 OpenTopography_api_key = os.getenv("OpenTopography_api_key", '56da0f69ae202d4d9414278b0f6537bd')
+OGM_ND_RESOLUTION = os.getenv("OGM_ND_RESOLUTION", 5)
+OGM_OBJ_RESOLUTION = os.getenv("OGM_OBJ_RESOLUTION", 5)
+SCALING_FACTOR = os.getenv("SCALING_FACTOR", 1)
 
 if not OpenTopography_api_key:
     logger.error("No OpenTopography_api_key")

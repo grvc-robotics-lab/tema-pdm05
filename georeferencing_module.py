@@ -112,6 +112,7 @@ def main(natural_disaster, flag, ground_resolution):
                     logger.info('Error: No .JPG nor .png files found in the specified directory.')
                     return
                 else:
+
                     run_geo(output_path, path, flag, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
                             max_elevation,
                             min_elevation, dem_bounds,
@@ -142,15 +143,25 @@ def main(natural_disaster, flag, ground_resolution):
         #         terrain_model, parallel_processing)
 
 
-def run_geo(output_path, path, flag, file_name,
+def run_geo(output_path_, path_, flag, file_name,
             Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
             dem_res_meter,
             downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing):
     # Inputs
-    image_path = path + file_name
+    image_path = path_ + file_name
 
     segmented_image = f'{image_path}.png'
     segmented_metadata_file = f'{image_path}_metadata.json'
+
+    ###############################################################
+    if not os.path.exists(segmented_image):
+        logger.error(f"Image file not found: {segmented_image}")
+        return
+    if not os.path.exists(segmented_metadata_file):
+        logger.error(f"Metadata file not found: {segmented_metadata_file}")
+        return
+    ###############################################################
+
     start_pixel = (0, 0)
     # Georeferencing the segmented image
     if flag == "segmented":
@@ -206,7 +217,7 @@ def run_geo(output_path, path, flag, file_name,
                                          min_elevation,
                                          dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
 
-        create_geotif(output_path, file_name, '_Segment', image, crn_dic, georef_dic_seg, camera_orientation,
+        create_geotif(output_path_, file_name, '_Segment', image, crn_dic, georef_dic_seg, camera_orientation,
                       coordinate_systeme)
 
         # Clean up an old temporary files
@@ -291,7 +302,7 @@ def run_geo(output_path, path, flag, file_name,
                 georef_dic_obj['label'] = labels[_]
                 boxes_georeferencing.append(georef_dic_obj)
 
-            create_geotif(output_path, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
+            create_geotif(output_path_, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
                           camera_orientation,
                           coordinate_systeme)
 
@@ -300,7 +311,7 @@ def run_geo(output_path, path, flag, file_name,
             os.remove(object_metadata_file)
 
 
-def create_metadata(json_data, takeoff_elev = 960):
+def create_metadata(json_data):
     '''
     This function returns camera position, orientation, and field of view by reading
     the image metadata
@@ -311,18 +322,18 @@ def create_metadata(json_data, takeoff_elev = 960):
     camera_lon = dms_to_decimal(lon_dms[0], lon_dms[2][:-1], lon_dms[3][:-2], lon_dms[4])
     lat_dms = json_data['GPSLatitude'].split()
     camera_lat = dms_to_decimal(lat_dms[0], lat_dms[2][:-1], lat_dms[3][:-2], lat_dms[4])
+    camera_alt = float(json_data['GPSAltitude'].split()[0])
     camera_alt_rel = float(json_data['RelativeAltitude'])
-    camera_alt = takeoff_elev + camera_alt_rel
     gimbal_roll = radians(float(json_data['GimbalRollDegree']))
     gimbal_pitch = radians(float(json_data['GimbalPitchDegree']))
-    gimbal_yaw = radians((360.0 + float(json_data['GimbalYawDegree'])) % 360)
+    gimbal_yaw = radians(float(json_data['GimbalYawDegree']))
     img_height = int(json_data['ImageHeight'])
     img_width = int(json_data['ImageWidth'])
 
     modality = json_data.get('Modality')
 
     dfov, hfov, vfov = None, None, None
-    if model == 'ZH20T' or model == 'M3E' or model == 'FC2403':
+    if model == 'ZH20T' or model == 'M3E' or model == 'FC2403'  or model == 'ZenmuseP1':
         if modality=='IR':
             dfov = 63.8
             hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
@@ -335,7 +346,6 @@ def create_metadata(json_data, takeoff_elev = 960):
     elif model == 'ZENMUSE Z30':
         dfov = 63.7
         hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
-        #
     elif model == 'L2D-20c':
         dfov = float(json_data.get('FOV').split()[0])
         hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
@@ -346,8 +356,12 @@ def create_metadata(json_data, takeoff_elev = 960):
         "camera_parameters": {"fov": FOV, "height": img_height, "width": img_width},
         "gimbal_parameters": {"roll": gimbal_roll, "pitch": gimbal_pitch, "yaw": gimbal_yaw},
     }
+    print(ImageMetadata)
 
     return ImageMetadata
+
+
+
 def dms_to_decimal(degrees, minutes, seconds, direction):
     '''
     This function converts degrees, minutes, seconds to decimal degrees
@@ -398,8 +412,8 @@ def calculate_hv_fov(dfov, w, h):
 
 
 def calculate_dnsmp_factors(altitude, hfov, vfov, img_width, img_height, field_resolution):
-    logger.info(f"HFOV ---> {hfov}")
-    logger.info(f"VFOV ---> {vfov}")
+    # logger.info(f"HFOV ---> {hfov}")
+    # logger.info(f"VFOV ---> {vfov}")
     field_w = 2 * altitude * tan(radians(hfov) / 2)
     field_h = 2 * altitude * tan(radians(vfov) / 2)
     new_img_w = field_w / field_resolution

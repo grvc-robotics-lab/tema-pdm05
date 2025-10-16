@@ -75,4 +75,4 @@ subscriptions_to_delete = [
 ]
 
 # Delete Subscriptions
-delete_subscriptions(subscriptions_to_delete)
+# delete_subscriptions(subscriptions_to_delete)

@@ -1,10 +1,13 @@
 import config
 from routes import app, socketio, subscribe_to_entities
+from delete_subscriptions import delete_subscriptions, subscriptions_to_delete
 from logging_config import logger  # Import the logger from the logging config module
 
 
 if __name__ == "__main__":
     logger.info("Starting the Flask application...")  # Log when the application starts
+
+    delete_subscriptions(subscriptions_to_delete)
 
     subscribe_to_entities()
 
