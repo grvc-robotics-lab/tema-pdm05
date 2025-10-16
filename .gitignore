@@ -43,3 +43,16 @@ estimated_OGM/
 # Jupyter
 .ipynb_checkpoints/
 
+# IDE
+.idea/
+.vscode/
+
+# Virtual env (your IF_module)
+IF_module/
+
+# Outputs
+georeferenced_drone_images/
+
+# Geospatial sidecars
+*.aux.xml
+*.tif.aux.xml
