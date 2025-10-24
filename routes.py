@@ -3,7 +3,6 @@ import copy
 import logging
 import tempfile
 import threading
-from operator import concat
 from threading import Lock
 import time
 import os
@@ -96,8 +95,6 @@ _last_upload = time.monotonic() - UPLOAD_INTERVAL
 _upload_lock = threading.Lock()
 # --------------------------------------------------------
 MAX_WORKERS = min(8, (os.cpu_count() or 4) * 2)
-
-# executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 # --------------------------------------------------------
 @app.route(f'/{config.BASE_PATH}')
 def index():
@@ -138,117 +135,6 @@ def logs_data():
             return log_file.read(), 200
     except FileNotFoundError:
         return "Log file not found.", 404
-
-
-"""
-This is the notify function used in the Dmalian Trail ROLL BACK TO THIS ONE IN CASE OF FAILURE
-"""
-"""@app.route(f'/{config.BASE_PATH}/{config.API_ENDPOINT}', methods=['POST'])
-def notify():
-    try:
-        notification_data = request.get_json()
-        if not isinstance(notification_data, dict):
-            logger.error("Invalid notification data: Expected a JSON object.", exc_info=True)
-            return jsonify({"error": "Invalid notification data format"}), 400
-
-        data_list = notification_data.get("data")
-        if not isinstance(data_list, list):
-            logger.error("Invalid notification data: 'data' must be a list.", exc_info=True)
-            return jsonify({"error": "Invalid notification data format"}), 400
-
-        for n in data_list:
-            if not isinstance(n, dict):
-                logger.error(f"Invalid notification: Expected a dictionary, got {type(n)}.", exc_info=True)
-                return jsonify({"error": f"Invalid notification format: {n}"}), 400
-
-        # --- Split by type so we can process Alerts first ---
-        alerts = [n for n in data_list if n.get("type") == "Alert"]
-        others = [n for n in data_list if n.get("type") != "Alert"]
-
-        # --- 1) Process ALERTS FIRST (even if disaster_type not set yet) ---
-        alerts_processed = 0
-        try:
-            if alerts:
-                with ThreadPoolExecutor(max_workers=8) as executor:
-                    futures = []
-                    for notification in alerts:
-                        if "type" not in notification:
-                            logger.error(f"Missing 'type' in notification: {notification}", exc_info=True)
-                            continue
-                        # logger.info(f"Processing notification: {notification['type']}")
-                        futures.append(executor.submit(process_notification, notification))
-                    for f in futures:
-                        try:
-                            f.result()
-                        except Exception as e:
-                            logger.error(f"Error in processing Alert notification: {e}", exc_info=True)
-                    alerts_processed = len(futures)
-        except Exception as e:
-            logger.warning(f'Issue in alert entity due to {e}')
-
-
-        # --- Re-read disaster type after processing Alerts ---
-        with global_cache_lock:
-            disaster_type = global_cache.get('natural_disaster', 'No disaster info')
-        have_alert_gate = (alerts_processed > 0) or (disaster_type in ["Fire", "Flood"])
-
-        # --- 2) ONLY NOW process non-Alert notifications (downloads, etc.) ---
-        others_processed = 0
-        try:
-            if have_alert_gate and disaster_type in ["Fire", "Flood"]:
-                with ThreadPoolExecutor(max_workers=8) as executor:
-                    futures = []
-                    for notification in others:
-                        if "type" not in notification:
-                            logger.error(f"Missing 'type' in notification: {notification}", exc_info=True)
-                            continue
-                        futures.append(executor.submit(process_notification, notification))
-                    for f in futures:
-                        try:
-                            f.result()
-                        except Exception as e:
-                            logger.error(f"Error in processing notification: {e}", exc_info=True)
-                    others_processed = len(futures)
-            else:
-                logger.info(f"Skipping non-Alert notifications "
-                            f"(have_alert_gate={have_alert_gate}, disaster_type={disaster_type}).")
-        except Exception as e:
-            logger.warning(f"Issues in non-Alert entities due to {e}")
-
-        # --- 3) Initialization stays in notify(), but only AFTER an Alert gate ---
-        started_init = False
-        with global_cache_lock:
-            # refresh disaster_type once more in case non-Alerts changed state (unlikely, but safe)
-            disaster_type = global_cache.get('natural_disaster', 'No disaster info')
-            if have_alert_gate and disaster_type in ["Fire", "Flood"]:
-                if not global_cache.get('processing'):
-                    global_cache['processing'] = True
-                    try:
-                        logger.info("Starting initialize_processing() in a new thread (post-Alert gate passed).")
-                        processing_thread = threading.Thread(target=initialize_processing, daemon=True)
-                        processing_thread.start()
-                        started_init = True
-                    except Exception as e:
-                        logger.error(f"Error in initialize_processing: {e}", exc_info=True)
-                        global_cache['processing'] = False
-                else:
-                    logger.info("initialize_processing() is already running, skipping.")
-            else:
-                logger.info(f"Skipping initialization (have_alert_gate={have_alert_gate}, "
-                            f"disaster_type={disaster_type}).")
-
-        return jsonify({
-            "status": "Notifications processed",
-            "alerts_processed": alerts_processed,
-            "others_processed": others_processed,
-            "started_initialization": started_init,
-            "disaster_type": disaster_type
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Unexpected error in notify function: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-"""
 
 
 @app.route(f'/{config.BASE_PATH}/{config.API_ENDPOINT}', methods=['POST'])
@@ -416,200 +302,59 @@ def notify():
         return jsonify({"error": "Internal server error"}), 500
 
 
-# @app.route(f'/{config.BASE_PATH}/{config.API_ENDPOINT}', methods=['POST'])
-# def notify():
-#     try:
-#         notification_data = request.get_json()
-#         if not isinstance(notification_data, dict):
-#             logger.error("Invalid notification data: Expected a JSON object.", exc_info=True)
-#             return jsonify({"error": "Invalid notification data format"}), 400
-#
-#         data_list = notification_data.get("data")
-#         if not isinstance(data_list, list):
-#             logger.error("Invalid notification data: 'data' must be a list.", exc_info=True)
-#             return jsonify({"error": "Invalid notification data format"}), 400
-#
-#         for n in data_list:
-#             if not isinstance(n, dict):
-#                 logger.error(f"Invalid notification: Expected a dictionary, got {type(n)}.", exc_info=True)
-#                 return jsonify({"error": f"Invalid notification format: {n}"}), 400
-#
-#         # --- PHASE 1: Separate and prioritize Alert entities ---
-#         alerts = [n for n in data_list if n.get("type") == "Alert"]
-#         others = [n for n in data_list if n.get("type") != "Alert"]
-#
-#         # --- CRITICAL: If we have Alerts, stop current processing and reset ---
-#         if alerts:
-#             logger.info(f"Alert received - stopping current processing and resetting system")
-#
-#             # Stop current processing thread
-#             with global_cache_lock:
-#                 global_cache['processing'] = False
-#
-#             # Clear events to ensure clean state
-#             alert_event.clear()
-#             other_entity_event.clear()
-#
-#             # Small delay to ensure processing thread stops
-#             time.sleep(0.5)
-#
-#         # --- PHASE 2: Process ALL Alert entities FIRST ---
-#         alerts_processed = 0
-#         if alerts:
-#             logger.info(f"Processing {len(alerts)} Alert(s) with HIGHEST priority")
-#
-#             # Process Alerts SYNCHRONOUSLY
-#             for alert_notification in alerts:
-#                 try:
-#                     if "type" not in alert_notification:
-#                         logger.error(f"Missing 'type' in Alert notification: {alert_notification}", exc_info=True)
-#                         continue
-#
-#                     logger.info(f"Processing HIGH-PRIORITY Alert: {alert_notification.get('id', 'Unknown ID')}")
-#                     process_notification(alert_notification)
-#                     alerts_processed += 1
-#
-#                 except Exception as e:
-#                     logger.error(f"Error processing Alert notification: {e}", exc_info=True)
-#
-#             logger.info(f"Completed processing {alerts_processed} Alert(s)")
-#
-#         # --- PHASE 3: Process non-Alert entities if appropriate ---
-#         others_processed = 0
-#         started_init = False
-#
-#         logger.info(f"alerts_processed  {alerts_processed}")
-#         # Check if we should process non-Alert entities
-#         with global_cache_lock:
-#             disaster_type = global_cache.get('natural_disaster', 'No disaster info')
-#
-#         should_process_others = (alerts_processed > 0 or disaster_type in ["Fire", "Flood"])
-#
-#         if should_process_others and others:
-#             logger.info(f"Processing {len(others)} non-Alert entities")
-#
-#             try:
-#                 with ThreadPoolExecutor(max_workers=8) as executor:
-#                     futures = []
-#                     for notification in others:
-#                         if "type" not in notification:
-#                             logger.error(f"Missing 'type' in notification: {notification}", exc_info=True)
-#                             continue
-#                         futures.append(executor.submit(process_notification, notification))
-#
-#                     for future in as_completed(futures):
-#                         try:
-#                             future.result()
-#                             others_processed += 1
-#                         except Exception as e:
-#                             logger.error(f"Error in processing non-Alert notification: {e}", exc_info=True)
-#
-#             except Exception as e:
-#                 logger.warning(f"Issues in non-Alert entities processing: {e}")
-#
-#         # --- PHASE 4: ALWAYS restart processing when we have Alerts ---
-#         with global_cache_lock:
-#             disaster_type = global_cache.get('natural_disaster', 'No disaster info')
-#
-#             # CRITICAL FIX: Always restart processing when we have new Alerts
-#             if alerts_processed > 0 and disaster_type in ["Fire", "Flood"]:
-#                 global_cache['processing'] = True
-#                 try:
-#                     logger.info("Starting/Restarting initialize_processing() due to new Alert")
-#                     processing_thread = threading.Thread(target=initialize_processing, daemon=True)
-#                     processing_thread.start()
-#                     started_init = True
-#                     logger.info("New processing thread started successfully")
-#                 except Exception as e:
-#                     logger.error(f"Error starting initialize_processing: {e}", exc_info=True)
-#                     global_cache['processing'] = False
-#             elif global_cache.get('processing'):
-#                 logger.info("Processing already running with existing thread")
-#             else:
-#                 logger.info(
-#                     f"No valid conditions to start processing: alerts_processed={alerts_processed}, disaster_type={disaster_type}")
-#
-#         return jsonify({
-#             "status": "Notifications processed with Alert prioritization",
-#             "alerts_processed": alerts_processed,
-#             "others_processed": others_processed,
-#             "started_initialization": started_init,
-#             "disaster_type": disaster_type,
-#             "priority_handling": "Alerts trigger system reset"
-#         }), 200
-#
-#     except Exception as e:
-#         logger.error(f"Unexpected error in notify function: {e}", exc_info=True)
-#         return jsonify({"error": "Internal server error"}), 500
-###################################################################
-
 def handle_person_vehicle_detection(notification, parameters):
     auth_filename = notification.get('parameters', {}).get('value', {}).get('FileName', None)
     detection = notification.get("detection", {}).get('value', {})
+    bm_id_from_notification = (notification.get('BM_id') or notification.get('bm_id') or {}).get('value')
+    if bm_id_from_notification != global_cache.get('bm_id'):
+        logger.warning(f"Not in the same BM {bm_id_from_notification}, File: {auth_filename}")
+        return
 
     if not auth_filename:
         logger.warning("No filename found for PersonVehicleDetection.")
         return
 
-    # Ensure filename contains a dot (.)
     if "." not in auth_filename:
         logger.error("Invalid filename format received: %s", auth_filename)
         return
 
-    # Getting disaster info from the global cache
     disaster_info = global_cache.get('natural_disaster', 'No disaster info')
     if disaster_info == 'No disaster info':
         logger.warning("No disaster information found in the cache.")
         return
 
-    ####################################################################
     scaling_factor = float(config.SCALING_FACTOR)
     for bbox in detection.get("boxes", []):
         current_bbox = bbox.get("bbox", [])
         try:
-            upscaled_bbox = [int(float(coord) * scaling_factor) for coord in current_bbox]
+            upscale_bbox = [int(float(coord) * scaling_factor) for coord in current_bbox]
         except (ValueError, TypeError) as e:
             raise ValueError("One or more bbox coordinates could not be converted to a number.") from e
-        bbox["bbox"] = upscaled_bbox
-        # logger.info(f'current bbox {current_bbox}')
-        # logger.info(f'scaled bbox {upscaled_bbox}')
-    ####################################################################
-    # TO ADAPT TO AUTH NEW UPLOAD STRUCTURE
+        bbox["bbox"] = upscale_bbox
+
     auth_filename = auth_filename.split("/")[-1]
-    ####################################################################
     metadata_file_base = auth_filename.split('.')[0]
-
     detection_file = f"{disaster_info}_{metadata_file_base}_obj.json"
-    # logger.info(f"detection_file of PersonVehicle   {detection_file}")
-
     metadata_file = f"{disaster_info}_{metadata_file_base}_objects_metadata.json"
-    # logger.info(f"metadata_file of PersonVehicle   {metadata_file}")
-
     download_path = None
-    # Constructing file paths
     if 'Flood' in metadata_file:
         download_path = os.path.join("downloads", "drone_imgs", 'Flood')
     elif 'Fire' in metadata_file:
         download_path = os.path.join("downloads", "drone_imgs", 'Fire')
-    # logger.info(f"download_path   {download_path}")
     os.makedirs(download_path, exist_ok=True)  # Ensure directory exists
-
     json_file_path_metadata = os.path.join(download_path, metadata_file)
     json_file_path_detection = os.path.join(download_path, detection_file)
-    # Writing metadata and detection to JSON files
+
     with open(json_file_path_metadata, 'w', encoding='utf-8') as json_file:
         json.dump(parameters, json_file, indent=4)
 
     with open(json_file_path_detection, 'w', encoding='utf-8') as json_file:
         json.dump(detection, json_file, indent=4)
 
-    # logger.info(f"Files written successfully: {json_file_path_metadata}, {json_file_path_detection}")
     try:
         main(disaster_info, "bbox", ground_resolution=1.00)
-        # logger.info("Geo-referencing is done correctly for person and vehicles.")
     except Exception as e:
         logger.error(f"Issue in geo-referencing due to {e}")
-
         return
 
 
@@ -617,15 +362,17 @@ def handle_segmentation(notification):
     bucket = notification.get("bucket", {}).get('value')
     auth_filename = notification.get('segmentation', {}).get('value')
     disaster = global_cache.get('natural_disaster', 'No disaster info')
+    bm_id_from_notification = (notification.get('BM_id') or notification.get('bm_id') or {}).get('value')
+    if bm_id_from_notification != global_cache.get('bm_id'):
+        logger.warning(f"Not in the same BM {bm_id_from_notification}, File: {auth_filename}")
+        return
 
     if not auth_filename or not isinstance(auth_filename, dict):
         logger.warning("Invalid or missing 'segmentation' value in notification.")
         return
 
     mask_id = auth_filename.get('mask_id')
-    # logger.info(f"complete path {mask_id}")
     mask_id_temp = mask_id.split('/')[-1]
-    file_path = None
     if not mask_id_temp:
         logger.warning("No mask_id found in auth_filename.")
         return
@@ -654,19 +401,15 @@ def handle_segmentation(notification):
     except Exception as e:
         logger.error(f"Error writing segmentation metadata: {e}")
 
-    # try:
-    # Synchronous file download simulation
     try:
         downloaded_file_path = minio_client.download_file(bucket, mask_id, file_path)
         if downloaded_file_path:
-            # logger.info(f"File downloaded successfully to {downloaded_file_path}")
             try:
                 main(disaster, "segmented", ground_resolution=1.00)
             except Exception as e:
                 logger.error(f"Error in Geo referencing due to {e}", exc_info=True)
         else:
             logger.error("File download failed.")
-
     except Exception as e:
         logger.error(f"Error downloading file for mask_id {mask_id}: {e}")
         return
@@ -677,9 +420,6 @@ def process_alert(notification, entity_id):
     if isinstance(location, dict) and "coordinates" in location:
         try:
             global_cache['roi'] = location['coordinates']
-            # logger.info(f"ROI set for entity ID {entity_id}: {global_cache['roi']}")
-            # print(f"ROI set for entity ID {entity_id}: {global_cache['roi']}")
-
         except Exception as e:
             logger.error(f"Error accessing 'coordinates' for entity ID {entity_id}: {e}")
             global_cache['roi'] = [None]
@@ -691,9 +431,6 @@ def process_alert(notification, entity_id):
     if event_:
         try:
             global_cache['natural_disaster'] = event_
-            # logger.info(f"Natural disaster set for entity ID {entity_id}: {global_cache['natural_disaster']}")
-            # print(f"Natural disaster set for entity ID {entity_id}: {global_cache['natural_disaster']}")
-
         except Exception as e:
             logger.error(f"Error accessing 'event' value for entity ID {entity_id}: {e}")
             global_cache['natural_disaster'] = "Unknown event"
@@ -705,7 +442,6 @@ def process_alert(notification, entity_id):
     if expiration:
         try:
             global_cache['expiration'] = expiration
-            # logger.info(f"expiration for entity ID {entity_id}: {global_cache['expiration']}")
         except Exception as e:
             logger.error(f"Error accessing 'expires' value for entity ID {entity_id}: {e}")
             global_cache['expiration'] = "No info"
@@ -714,9 +450,6 @@ def process_alert(notification, entity_id):
     if isinstance(ignitionPoints, dict) and "coordinates" in ignitionPoints:
         try:
             global_cache['ignitionPoints'] = ignitionPoints['coordinates']
-            # logger.info(f"ignitionPoints set for entity ID {entity_id}: {global_cache['ignitionPoints']}")
-            # print(f"ignitionPoints set for entity ID {entity_id}: {global_cache['ignitionPoints']}")
-
         except Exception as e:
             logger.error(f"Error accessing 'ignitionPoints' for entity ID {entity_id}: {e}")
             global_cache['ignitionPoints'] = "No info"
@@ -728,7 +461,6 @@ def process_alert(notification, entity_id):
     if alert_timestamp:
         try:
             global_cache['alert_timestamp'] = alert_timestamp
-            # logger.info(f"alert_timestamp for entity ID {entity_id}: {global_cache['alert_timestamp']}")
         except Exception as e:
             logger.error(f"Error accessing 'expires' value for entity ID {entity_id}: {e}")
             global_cache['alert_timestamp'] = "No info"
@@ -737,9 +469,6 @@ def process_alert(notification, entity_id):
     if bm_id:
         try:
             global_cache['bm_id'] = bm_id
-            # logger.info(f"bm_id: {global_cache['bm_id']}")
-            # print(f"bm_id: {global_cache['bm_id']}")
-
         except Exception as e:
             logger.error(f"Error accessing bm_id value for entity ID {entity_id}: {e}")
             global_cache['bm_id'] = "Unknown event"
@@ -760,6 +489,10 @@ def fetch_burnt_area(notification, polygon):
         logger.info("No valid URL found in the notification.")
         return
 
+    bm_id_from_notification = (notification.get('BM_id') or notification.get('bm_id') or {}).get('value')
+    if bm_id_from_notification != global_cache.get('bm_id'):
+        logger.warning(f"Not in the same BM {bm_id_from_notification}, BurntArea")
+        return
     # Try to download via MinIO first, fall back to HTTP if it fails
     file_content = None
     minio_success = False
@@ -899,140 +632,6 @@ def fetch_burnt_area(notification, polygon):
     logger.info(f"Saved normalized burnt-confidence GeoTIFF to {output_tif}")
 
 
-# def fetch_burnt_area(notification, polygon):
-#     """
-#     Fetch burnt-area features from the notification's URL,
-#     rasterize 'confidence' at 10 m resolution (normalized [0,1]),
-#     mask to the input polygon, and save a single-band GeoTIFF.
-#     """
-#     url = notification.get('data').get('value').get('href')
-#     if not url:
-#         logger.info("No valid URL found in the notification.")
-#         return
-#
-#     # 2. Download and parse GeoJSON
-#     resp = requests.get(url)
-#     resp.raise_for_status()
-#     features = resp.json().get("features", [])
-#     if not features:
-#         logger.info("No burnt-area features returned.")
-#         return
-#
-#     # 3. Load into GeoDataFrame (EPSG:4326)
-#     gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
-#
-#     # 4. Pick UTM zone from polygon centroid
-#     lon, lat = polygon.centroid.x, polygon.centroid.y
-#     zone = int((lon + 180) / 6) + 1
-#     epsg = 32600 + zone if lat >= 0 else 32700 + zone
-#
-#     # 5. Reproject
-#     gdf_utm = gdf.to_crs(epsg=epsg)
-#     poly_utm = (
-#         gpd.GeoSeries([polygon], crs="EPSG:4326")
-#         .to_crs(epsg=epsg)
-#         .iloc[0]
-#     )
-#
-#     # 6. Compute 10 m grid
-#     minx, miny, maxx, maxy = poly_utm.bounds
-#     res = float(config.OGM_ND_RESOLUTION)
-#     width = int(math.ceil((maxx - minx) / res))
-#     height = int(math.ceil((maxy - miny) / res))
-#     transform = Affine(res, 0, minx, 0, -res, maxy)
-#
-#     # 7. Rasterize raw confidence (0–100)
-#     shapes = (
-#         (geom, float(props.get("confidence", 0.0)))
-#         for geom, props in zip(
-#         gdf_utm.geometry,
-#         gdf_utm[["confidence"]].to_dict("records")
-#     )
-#     )
-#     raster = rasterize(
-#         shapes, out_shape=(height, width),
-#         transform=transform, fill=0.0, dtype="float32"
-#     )
-#
-#     # 7a. Normalize to [0,1]
-#     raster = raster / 100.0
-#
-#     # 7b. Mask outside the exact polygon
-#     mask = geometry_mask(
-#         [poly_utm], out_shape=(height, width),
-#         transform=transform, invert=True
-#     )
-#     raster[~mask] = 0.0
-#
-#     # 8. Write GeoTIFF
-#     output_tif = "downloads/satellite_imgs/Fire/cropped_burnt_confidence_10m_norm.tif"
-#     with rasterio.open(
-#             output_tif, "w", driver="GTiff",
-#             height=height, width=width, count=1,
-#             dtype="float32", crs=f"EPSG:{epsg}",
-#             transform=transform, nodata=0.0
-#     ) as dst:
-#         dst.write(raster, 1)
-#         dst.set_band_description(1, "normalized_burnt-area_confidence (0–1)")
-#
-#     # logger.info(f"Saved normalized burnt-confidence GeoTIFF to {output_tif}")
-
-
-# def fetch_burnt_area(notification, polygon):
-#     """
-#     Fetch burnt area data using the parsed URL and save it as a GeoTIFF.
-#     """
-#     # Parse URL from notification
-#     url = notification.get('data').get('value').get('href')
-#     if not url:
-#         logger.info("No valid URL found in the notification.")
-#         return
-#
-#     # Convert polygon to bounding box
-#     minx, miny, maxx, maxy = polygon.bounds
-#     bbox = f"{minx},{miny},{maxx},{maxy}"
-#
-#     # Fetch data from API
-#     response = requests.get(url, stream=True)
-#     response.raise_for_status()
-#     data = response.json()
-#
-#     # Extract geometries and convert to GeoDataFrame
-#     features = data.get("features", [])
-#     if not features:
-#         logger.info("No burnt area data found for the given parameters.")
-#         return
-#
-#     gdf = gpd.GeoDataFrame.from_features(features)
-#     gdf = gdf.set_crs("EPSG:4326")  # Ensure CRS is set
-#
-#     # Rasterize the data
-#     width, height = 500, 500  # Resolution of output raster
-#     transform = from_bounds(minx, miny, maxx, maxy, width, height)
-#     raster_data = np.zeros((height, width), dtype=np.uint8)
-#
-#     for geom in gdf.geometry:
-#         coords = [(int((x - minx) / (maxx - minx) * width), int((y - miny) / (maxy - miny) * height)) for x, y in
-#                   geom.exterior.z_coords]
-#         for x, y in coords:
-#             if 0 <= x < width and 0 <= y < height:
-#                 raster_data[y, x] = 255  # Mark burnt area
-#
-#     output_tif = 'downloads/satellite_imgs/Fire/cropped_burnt_area.tif'
-#     with rasterio.open(
-#             output_tif, "w",
-#             driver="GTiff",
-#             height=height,
-#             width=width,
-#             count=1,
-#             dtype=raster_data.dtype,
-#             crs="EPSG:4326",
-#             transform=transform
-#     ) as dst:
-#         dst.write(raster_data, 1)
-#
-#     print(f"GeoTIFF saved to {output_tif}")
-
 def download_file(entity_type, filename_, bucket):
     file_path = ""
 
@@ -1047,10 +646,8 @@ def download_file(entity_type, filename_, bucket):
 
     try:
         if entity_type == "StandardArrivalTime":
-            # logger.info(f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
             return minio_client.download_file(bucket, filename_, file_path)
         else:
-            # logger.info(f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
             return minio_client.download_file(bucket['value'], filename_['value'], file_path)
     except Exception as e:
         logger.error(f"Error downloading file {filename_['value']} from bucket {bucket['value']}: {e}")
@@ -1066,83 +663,85 @@ def download_tif_file(entity, polygon):
     """
     minio_success = False
     try:
-        file_url = entity.get('data').get('value').get('href')
-        bucket_dlr = file_url.split('/')[-3]
-        file_name_1 = concat(file_url.split('/')[-2],concat('/',file_url.split('/')[-1]))
-        if file_url:
-            file_name = file_url.split("/")[-1]
-            file_path = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
-            try:
-                downloaded_file_path = minio_client.download_file(bucket_dlr, file_name_1, file_path)
+        data_value = entity.get('data', {}).get('value', {})
+        file_url = data_value.get('href', {})
 
-                if downloaded_file_path:
-                    logger.info(f"File downloaded successfully to {downloaded_file_path}")
-                    minio_success = True
-                else:
-                    logger.error("File download failed.")
-
-                file_name = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
-                ################################################
-                try:
-                    input_tif = file_name
-                    output_tif = file_name
-                    ring = polygon[0] if (isinstance(polygon, list) and polygon and isinstance(polygon[0], list)
-                                          and polygon and isinstance(polygon[0][0], list)) else polygon
-                    if ring[0] != ring[-1]:
-                        ring = ring + [ring[0]]
-
-                    poly_ll = Polygon(ring)
-                    if not poly_ll.is_valid:
-                        poly_ll = poly_ll.buffer(0)
-
-                    with rasterio.open(input_tif) as src:
-                        if src.crs is None:
-                            raise ValueError("Raster has no CRS. Cannot reproject polygon.")
-
-                        raster_crs = CRS.from_user_input(src.crs)
-                        wgs84 = CRS.from_epsg(4326)
-
-                        if raster_crs != wgs84:
-                            to_raster = Transformer.from_crs(wgs84, raster_crs, always_xy=True).transform
-                            poly_dst = shapely_transform(to_raster, poly_ll)
-                        else:
-                            poly_dst = poly_ll
-
-                        raster_extent = box(src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top)
-                        if not poly_dst.intersects(raster_extent):
-                            raise ValueError(
-                                f"Polygon does not intersect raster extent. "
-                                f"Raster bounds (in {raster_crs.to_string()}): {src.bounds}"
-                            )
-
-                        shapes = [mapping(poly_dst)]
-                        out_image, out_transform = mask(src, shapes=shapes, crop=True)
-
-                        out_meta = src.meta.copy()
-                        out_meta.update({
-                            "driver": "GTiff",
-                            "height": out_image.shape[1],
-                            "width": out_image.shape[2],
-                            "transform": out_transform
-                        })
-
-                    with rasterio.open(output_tif, "w", **out_meta) as dest:
-                        dest.write(out_image)
-
-                    logger.info(f"Cropping complete. Saved as {output_tif}")
-                    return output_tif
-
-                except Exception as e:
-                    logger.warning(f"Sat image was not cropped due to: {e}")
-                    return input_tif
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to download file: {e}")
-                print(f"Failed to download file: {e}")
-                return None
-        else:
+        if not file_url:
             logger.error("No valid download URL found in entity.")
-            print("No valid download URL found in entity.")
+            return None
+
+        bucket_dlr = file_url.split('/')[-4]
+        file_name_minio = f"{file_url.split('/')[-3]}/{file_url.split('/')[-2]}/{file_url.split('/')[-1]}"
+        file_name = file_url.split("/")[-1]
+        file_path = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
+
+        try:
+            downloaded_file_path = minio_client.download_file(bucket_dlr, file_name_minio, file_path)
+
+            if downloaded_file_path:
+                logger.info(f"File downloaded successfully to {downloaded_file_path}")
+                minio_success = True
+            else:
+                logger.error("File download failed. via MINIO")
+
+            file_name = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
+            input_tif = file_name
+            output_tif = file_name
+            try:
+                ring = polygon[0] if (isinstance(polygon, list) and polygon and isinstance(polygon[0], list)
+                                      and polygon and isinstance(polygon[0][0], list)) else polygon
+                if ring[0] != ring[-1]:
+                    ring = ring + [ring[0]]
+
+                poly_ll = Polygon(ring)
+                if not poly_ll.is_valid:
+                    poly_ll = poly_ll.buffer(0)
+
+                with rasterio.open(input_tif) as src:
+                    if src.crs is None:
+                        raise ValueError("Raster has no CRS. Cannot reproject polygon.")
+
+                    raster_crs = CRS.from_user_input(src.crs)
+                    wgs84 = CRS.from_epsg(4326)
+
+                    if raster_crs != wgs84:
+                        to_raster = Transformer.from_crs(wgs84, raster_crs, always_xy=True).transform
+                        poly_dst = shapely_transform(to_raster, poly_ll)
+                    else:
+                        poly_dst = poly_ll
+
+                    raster_extent = box(src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top)
+                    if not poly_dst.intersects(raster_extent):
+                        raise ValueError(
+                            f"Polygon does not intersect raster extent. "
+                            f"Raster bounds (in {raster_crs.to_string()}): {src.bounds}"
+                        )
+
+                    shapes = [mapping(poly_dst)]
+                    out_image, out_transform = mask(src, shapes=shapes, crop=True)
+
+                    out_meta = src.meta.copy()
+                    out_meta.update({
+                        "driver": "GTiff",
+                        "height": out_image.shape[1],
+                        "width": out_image.shape[2],
+                        "transform": out_transform
+                    })
+
+                with rasterio.open(output_tif, "w", **out_meta) as dest:
+                    dest.write(out_image)
+
+                logger.info(f"Cropping complete. Saved as {output_tif}")
+                return output_tif
+
+            except Exception as e:
+                logger.warning(f"Sat image was not cropped due to: {e}")
+                return input_tif
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to download file: {e}")
+            print(f"Failed to download file: {e}")
+            return None
     except Exception as e:
             logger.warning(f"MinIO download failed: {e}, falling back to HTTP")
     ##################################################################################
@@ -1153,7 +752,8 @@ def download_tif_file(entity, polygon):
             """
                 Downloads a .tif file from the entity's data URL if the notification corresponds to "EOFloodExtent".
             """
-            file_url = entity.get('data').get('value').get('href')
+            data_value = entity.get('data', {}).get('value', {})
+            file_url = data_value.get('href')
             if file_url:
                 file_name = file_url.split("/")[-1]
                 logger.info(f"Downloading {file_name} from {file_url}...")
@@ -1185,7 +785,7 @@ def download_tif_file(entity, polygon):
                     return file_name
 
                 except requests.exceptions.RequestException as e:
-                    logger.error(f"Failed to download file: {e}")
+                    logger.error(f"Failed to download file via hyperref: {e}")
                     return None
             else:
                 logger.error("No valid download URL found in entity.")
@@ -1213,7 +813,6 @@ def download_hotspots_geojson(notification_data):
 
     try:
         minio_client.download_file(bucket_name, object_name, local_file_path)
-        # logger.info(f"File downloaded successfully: {local_file_path}")
     except Exception as e:
         logger.error(f"Unexpected error occurred: {e}")
 
@@ -1226,16 +825,20 @@ def process_notification(notification):
         logger.error(f"Invalid notification received: {notification}")
         return
     try:
+        # --------------------------------------------------------------------------#
+        # Alert
+        # --------------------------------------------------------------------------#
         if entity_type == "Alert":
             try:
                 logger.info("Triggering Alert entity processing")
-                # print("Triggering Alert entity processing")
                 process_alert(notification, entity_id)
                 alert_event.set()
             except Exception as e:
                 logger.error(f"Error processing Alert entity ID {entity_id}: {e}")
-
-        # Notify initialize_processing for non-Alert entities
+            return
+        # --------------------------------------------------------------------------#
+        # Non Alert entities
+        # --------------------------------------------------------------------------#
         if entity_type != "Alert":
             with global_cache_lock:
                 alert_was_received = global_cache.get('alert_received', False)
@@ -1245,122 +848,138 @@ def process_notification(notification):
                         other_entity_event.set()
                     except Exception as e:
                         logger.error(f"Error setting other_entity_event for entity ID {entity_id}: {e}")
-        #######################################################################################################
+        # --------------------------------------------------------------------------#
+        # PersonVehicleDetection
+        # --------------------------------------------------------------------------#
         if entity_type == "PersonVehicleDetection":
             try:
                 parameters = notification.get("parameters", {}).get('value', {})
                 if not parameters:
-                    raise ValueError(f"Missing parameters in notification: {notification}")
+                    logger.warning(f"Missing parameters in notification for entity {entity_id}")
+                    return
                 handle_person_vehicle_detection(notification, parameters)
             except Exception as e:
-                logger.error(f"Error processing PersonVehicleDetection for entity ID {entity_id}: {e}", exc_info=True)
-        #######################################################################################################
+                logger.error(f"Error processing PersonVehicleDetection for entity {entity_id}: {e}", exc_info=True)
+        # --------------------------------------------------------------------------#
+        # FireSegmentation, FloodSegmentation, BurntSegmentation
+        # --------------------------------------------------------------------------#
         elif entity_type in ["FireSegmentation", "FloodSegmentation", "BurntSegmentation"]:
             try:
                 handle_segmentation(notification)
             except Exception as e:
-                logger.error(f"Error handling segmentation for entity ID {entity_id}: {e}", exc_info=True)
-        #######################################################################################################
+                logger.error(f"Error handling segmentation for entity {entity_id}: {e}", exc_info=True)
+        # --------------------------------------------------------------------------#
+        # EOFloodExtent
+        # --------------------------------------------------------------------------#
         elif entity_type == "EOFloodExtent":
             try:
                 roi_data = global_cache.get('roi')
+                bm_id_from_notification = (notification.get('BM_id') or notification.get('bm_id') or {}).get('value')
+                if bm_id_from_notification != global_cache.get('bm_id'):
+                    logger.warning(f"Not in the same BM {bm_id_from_notification}, Entity: {entity_type}")
+                    return
                 download_tif_file(notification, roi_data)
             except Exception as e:
-                logger.error(f"Error handling EOFloodExtent for entity ID {entity_id}: {e}")
-        #######################################################################################################
+                logger.error(f"Error handling EOFloodExtent for entity {entity_id}: {e}")
+        # --------------------------------------------------------------------------#
+        # EOBurntArea
+        # --------------------------------------------------------------------------#
         elif entity_type == "EOBurntArea":
             try:
-                # logger.info(f"Processing {entity_type} entity: Downloading .tif file")
                 roi_data = global_cache.get('roi')
                 polygon = Polygon(roi_data[0])
                 fetch_burnt_area(notification, polygon)
             except Exception as e:
                 logger.error(f"Error handling EOBurntArea for entity ID {entity_id}: {e}", exc_info=True)
-        #######################################################################################################
-        elif entity_type == "HotspotResult" or entity_type == "SinglePostResult":
+        # --------------------------------------------------------------------------#
+        # Geo Social media analysis
+        # --------------------------------------------------------------------------#
+        elif entity_type in ["HotspotResult", "SinglePostResult"]:
             try:
                 filename_ = notification.get('filename')
                 bucket = notification.get("bucket")
-                # logger.info(f"Processing {entity_type} entity: Downloading .geojson file")
-                # print(f"Processing {entity_type} entity: Downloading .geojson file")
-                ######################################################################################
+                bm_id_from_notification = (notification.get('BM_id') or notification.get('bm_id') or {}).get('value')
+                if bm_id_from_notification != global_cache.get('bm_id'):
+                    logger.warning(f"Not in the same BM {bm_id_from_notification}, Entity: {entity_type}")
+                    return
                 if not (isinstance(filename_, dict) and 'value' in filename_ and
                         isinstance(bucket, dict) and 'value' in bucket):
                     logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
+                    return
                 elif filename_['value'] and bucket['value']:
                     last_part_split = filename_['value'].split("/")[-1]
                     file_path = f"downloads/SocialMedia/{last_part_split}"
                     try:
-                        # logger.info(
-                        #     f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
-                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'],
-                                                                          file_path)
+                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'], file_path)
                         if downloaded_file_path:
                             logger.info(f"File downloaded successfully to {downloaded_file_path}")
                         else:
                             logger.error("File download failed.")
                     except Exception as e:
                         logger.error(f"Error in downloading file: {e}", exc_info=True)
-                ######################################################################################
             except Exception as e:
                 logger.error(f"Error in handling of entity ID {entity_id}: {e}")
-        #######################################################################################################
+        # --------------------------------------------------------------------------#
+        # FloodCalculationResult
+        # --------------------------------------------------------------------------#
         elif entity_type == "FloodCalculationResult":
             try:
                 filename_ = notification.get('filename')
                 bucket = notification.get("bucket")
-                # logger.info(f"Processing {entity_type} entity: Downloading .geotif file")
-                ######################################################################################
-                if not (isinstance(filename_, dict) and 'value' in filename_ and
-                        isinstance(bucket, dict) and 'value' in bucket):
-                    logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
+                bm_id_from_notification = (notification.get('BM_id') or notification.get('bm_id') or {}).get('value')
+                if bm_id_from_notification != global_cache.get('bm_id'):
+                    logger.warning(f"Not in the same BM {bm_id_from_notification}, Entity: {entity_type}")
+                    return
+                if not all([
+                    isinstance(filename_, dict) and filename_.get('value'),
+                    isinstance(bucket, dict) and bucket.get('value'),
+                    bm_id_from_notification]):
+                    logger.warning(
+                        "Invalid or missing required fields in notification: 'filename', 'bucket', or 'bm_id'")
+                    return
                 elif filename_['value'] and bucket['value']:
                     file_path = f"downloads/FloodSim/{filename_['value']}"
                     try:
-                        # logger.info(
-                        #     f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
-                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'],
-                                                                          file_path)
+                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'], file_path)
                         if downloaded_file_path:
                             logger.info(f"File downloaded successfully to {downloaded_file_path}")
                         else:
                             logger.error("File download failed.")
                     except Exception as e:
                         logger.error(f"Error in downloading file: {e}", exc_info=True)
-                ######################################################################################
             except Exception as e:
                 logger.error(f"Error in handling of entity ID {entity_id}: {e}")
-        #######################################################################################################
+        # --------------------------------------------------------------------------#
+        # StandardArrivalTime
+        # --------------------------------------------------------------------------#
         elif entity_type == "StandardArrivalTime":
             try:
                 filename_ = notification.get('file_name')
                 bucket = notification.get("bucket")
-                # logger.info(f"Processing {entity_type} entity: Downloading .geotif file")
-                ######################################################################################
+                bm_id_from_notification = (notification.get('BM_id') or notification.get('bm_id') or {}).get('value')
+                if bm_id_from_notification != global_cache.get('bm_id'):
+                    logger.warning(f"Not in the same BM {bm_id_from_notification}, Entity: {entity_type}")
+                    return
                 if not (isinstance(filename_, dict) and 'value' in filename_ and
                         isinstance(bucket, dict) and 'value' in bucket):
                     logger.warning("Invalid or missing 'filename' or 'bucket' in notification.")
+                    return
                 elif filename_['value'] and bucket['value']:
                     try:
                         last_part_split = filename_['value'].split("/")[-1]
                         file_path = f"downloads/FireSim/{last_part_split}"
-                        # logger.info(
-                        #     f"Downloading file '{filename_['value']}' from bucket '{bucket['value']}' to '{file_path}'.")
-                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'],
-                                                                          file_path)
+                        downloaded_file_path = minio_client.download_file(bucket['value'], filename_['value'], file_path)
                         if downloaded_file_path:
                             logger.info(f"File downloaded successfully to {downloaded_file_path}")
                         else:
                             logger.error("File download failed.")
                     except Exception as e:
                         logger.error(f"Error in downloading file: {e}", exc_info=True)
-                ######################################################################################
             except Exception as e:
                 logger.error(f"Error in handling of entity ID {entity_id}: {e}")
-        #######################################################################################################
+        # --------------------------------------------------------------------------#
     except Exception as e:
         logger.error(f"Error processing notification {entity_id} of type {entity_type}: {e}")
-
 
 ########################################################################################################################
 def download_opentopography_dem(api_key, output_file, coordinates, dem_dataset):
@@ -1397,15 +1016,10 @@ def download_opentopography_dem(api_key, output_file, coordinates, dem_dataset):
 
     # Submit the request to OpenTopography
     try:
-        print(f"Submitting request to OpenTopography for DEM ({dem_dataset})...")
         response = requests.get(api_url, params=params, stream=True)
-        ##############################################
-        print("HTTP status:", response.status_code)
-        print("Content-Type:", response.headers.get("Content-Type"))
         data = response.content
         with open(output_file, "wb") as f:
             f.write(data)
-        ##############################################
         logger.info(f"DEM downloaded and saved to {output_file}")
     except requests.RequestException as e:
         logger.info(f"Failed to download DEM: {e}")
@@ -1428,7 +1042,6 @@ def delete_files_in_directory(dir_path, skip_exts=None):
             file_path = os.path.join(dir_path, file)
             if os.path.isfile(file_path):
                 os.remove(file_path)
-                # logger.info(f"Deleted file: {file_path}")
 
 
 def initialize_processing():
@@ -1470,8 +1083,6 @@ def initialize_processing():
 
             if not event_occurred:
                 continue
-
-            # logger.info(f"Events detected - alert_event: {alert_event.is_set()}, other_entity_event: {other_entity_event.is_set()}")
 
             try:
                 if alert_event.is_set():
@@ -1543,7 +1154,6 @@ def initialize_processing():
 
                         if not ogm_flag:
                             try:
-
                                 polygon_coordinates = convert_to_polygon()
                                 disaster_type = global_cache.get('natural_disaster', 'No disaster info')
                                 ogm_path_ND = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
@@ -1606,20 +1216,15 @@ def initialize_processing():
                                 logger.warning(f"Error in OGM initialization: {e}")
 
                 alert_event.clear()
-                    # Do not clear the alert_event here if you want it to remain active
-                    # alert_event.clear()  <-- Remove this if you rely solely on the timestamp.
-                    # alert_event.clear()  <-- Remove this if you rely solely on the timestamp.
                 ############################################################################################################
                 # Process Non‑Alert Notifications only if no new alert has arrived.
                 ############################################################################################################
-
                 if other_entity_event.is_set() and entities_initialized:
                     current_alert_ts = global_cache.get('alert_timestamp', "No info")
                     if current_alert_ts != last_processed_alert_ts:
                         logger.info("A new alert arrived. Skipping non-alert processing this iteration.")
                         other_entity_event.clear()
                     else:
-                        # while True:
                         with ThreadPoolExecutor(max_workers=8) as executor:
                             future_nd = executor.submit(estimate_nd_status)
                             future_obj = executor.submit(estimate_objects_status)
@@ -1671,7 +1276,6 @@ def subscribe_to_entities():
         "HotspotResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:008",  # Tested and able to download
         "SinglePostResult": "urn:ngsi-ld:tema:subscription:USE:PDM05:009",  # Tested and able to download
         "EOBurntArea": "urn:ngsi-ld:tema:subscription:USE:PDM05:010",
-        # # Tested and able to download (href) cropped tif
         "EOFloodExtent": "urn:ngsi-ld:tema:subscription:USE:PDM05:011",  # Tested and able to download (href)
     }
 
@@ -1704,14 +1308,12 @@ def create_subscription(subscription_url, payload, headers):
     try:
         response = requests.post(subscription_url, json=payload, headers=headers)
         if response.status_code in (200, 201):
-            print(f"Subscription {payload['id']} created successfully.")
-            # logger.info(f"Subscription {payload['id']} created successfully.")
+            logger.info(f"Subscription {payload['id']} created successfully.")
         else:
             logger.error(
                 f"Failed to create subscription {payload['id']}. Status: {response.status_code}, Body: {response.text}")
     except Exception as e:
-        logger.exception("An error occurred while creating the subscription.")
-        # print(f"An error occurred while creating the subscription: {e}")
+        logger.exception(f"An error occurred while creating the subscription: {e}")
 
 
 ##########################################################################
@@ -1939,7 +1541,6 @@ def predict_ogm_flood(ogm_file, pred_file):
     # Now the highest flood value becomes 0 and the lowest becomes 1.
     updated_ogm = normalized_pred
 
-    # logger.info(f"updates ogm prediction values  {updated_ogm}")
     # Update the profile to reflect the new data type.
     ogm_profile.update(dtype=rasterio.float32, count=1)
 
@@ -2112,7 +1713,6 @@ def estimate_nd_status():
             if pred_file.lower().endswith('.tif'):
                 pred_file = os.path.join(prediction_path, pred_file)
                 logger.info(f"prediction file ---> {pred_file}")
-                # logger.info(f"OGM file ---> {ogm_path}")
                 if disaster_type == 'Flood':
                     # predict_ogm_flood(ogm_path,
                     #                   pred_file)
@@ -2178,7 +1778,6 @@ def estimate_nd_status():
                                                        ogm_gt_,
                                                        observe_data_drone,
                                                        observe_gt_drone)
-                # logger.info(f"OGM done successfully  FOR FLOOD ND {ogm_data.shape}")
     except Exception as e:
         logger.info(f'Error in fusing Segmented Flood images due to {e}')
     ######################################################################
@@ -2224,10 +1823,6 @@ def estimate_nd_status():
             observe_data_drone = np.asarray(observe_data_drone)
             if observe_data_drone.max() > 1:
                 observe_data_drone = observe_data_drone / 255.0
-            # logger.info(f"observe_data_drone {observe_data_drone.shape}")
-            # logger.info(f"observe_gt_drone {observe_gt_drone}")
-            # logger.info(f"observe_proj_drone {observe_proj_drone}")
-            # logger.info(f"data_type {data_type}")
             ############################################################
             try:
                 if disaster_type == 'Fire' and observe_data_drone is not None:
@@ -2815,10 +2410,7 @@ def estimate_objects_status():
     5) Save final OGM (overwrite + timestamped, filtering label == -1 only from the timestamped).
     6) Prepare metadata and upload the final result.
     """
-    # global georeferenced_obj_flag
-    # while georeferenced_obj_flag:
-    # (1) Load OGM
-    # logger.info("Estimating Maps4Objects in the loop")
+
     disaster_type = global_cache.get("natural_disaster", "NoDisaster")
     if disaster_type == "NoDisaster":
         logger.info("No valid disaster type. Aborting object status estimation.")
@@ -2849,20 +2441,16 @@ def estimate_objects_status():
         return
 
     ogm_features = ogm_metadata.get("features", [])
-    # logger.info(f"Loaded OGM with {len(ogm_features)} features.")
-
     # (2) Integrate Drone Data (Association + update)
     observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images/detection")
     if observ_metadata and isinstance(observ_metadata, dict):
         drone_features = observ_metadata.get("features", [])
-        # logger.info(f"Observ metadata => {len(drone_features)} new Drone features found.")
         distance_threshold = (int(config.OGM_OBJ_RESOLUTION) // 1)
         matches = associate_features_with_measurements(
             ogm_features,
             drone_features,
             distance_threshold
         )
-        # logger.info(f"Hungarian matching => {len(matches)} associations (within {distance_threshold}m).")
 
         # — stash label, score, grid_center & raw_measurement
         for (i_ogm, i_drone) in matches:
@@ -2928,17 +2516,11 @@ def estimate_objects_status():
             if ff.get("properties", {}).get("label", -1) != -1
         ]
         new_count = len(filtered_metadata["features"])
-        # logger.info(
-        #     f"KF step => filtered out label == -1 for timestamped version: "
-        #     f"old count={original_count}, new count={new_count}."
-        # )
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         timestamped_name = f"occupancy_grid_map_{disaster_type}_Objects_{ts}.json"
         with open(os.path.join("estimated_OGM", timestamped_name), "w") as f:
             json.dump(filtered_metadata, f, indent=4)
-
-        # logger.info("Kalman filter applied to OGM.")
 
         ##################################################################################
         # Save and Upload
@@ -3014,7 +2596,6 @@ def estimate_objects_status():
             matches = associate_features_with_measurements(
                 ogm_features, sm_features, distance_threshold=(int(config.OGM_OBJ_RESOLUTION) // 1)
             )
-            # logger.info(f"Social Media matching => {len(matches)} associations (within 5m).")
 
             for (i_ogm, i_sm) in matches:
                 ogm_feat = ogm_features[i_ogm]
@@ -3030,7 +2611,6 @@ def estimate_objects_status():
 
             # Remove file after processing
             os.remove(sm_path)
-            # logger.info(f"Processed and removed {sm_path}")
 
         # Overwrite + timestamp after SocialMedia integration
         with open(ogm_metadata_path, "w") as f:
@@ -3571,7 +3151,6 @@ def convert_to_polygon(return_bounding_box=True):
         if roi_polygon[0] != roi_polygon[-1]:
             raise ValueError("ROI polygon is not closed. The first and last coordinates must match.")
 
-        # logger.info(f"Retrieved ROI polygon: {roi_polygon}")
 
         if not return_bounding_box:
             return roi_polygon  # Return the original polygon if requested
@@ -3594,8 +3173,6 @@ def convert_to_polygon(return_bounding_box=True):
             [minx, miny],  # Bottom-left
             [minx, maxy]  # Closing the polygon
         ]
-
-        # logger.info(f"Generated polygon coordinates: {polygon_coords_}")
         return polygon_coords_
 
     except ValueError as ve:
@@ -3618,10 +3195,8 @@ def initialize_entities():
     # Determine ND_entity_ID based on a natural disaster type
     if natural_disaster == 'Fire':
         ND_entity_ID = config.ENTITY_Maps4Fire_ID + f'{global_cache.get("bm_id")}'
-        # logger.info(f"Set ND_entity_ID for Fire: {ND_entity_ID}")
     elif natural_disaster == 'Flood':
         ND_entity_ID = config.ENTITY_Maps4Flood_ID + f'{global_cache.get("bm_id")}'
-        # logger.info(f"Set ND_entity_ID for Flood: {ND_entity_ID}")
     else:
         logger.warning(f"Unrecognized natural disaster type: {natural_disaster}")
         ND_entity_ID = None
@@ -4019,8 +3594,6 @@ def generate_geo_dict_from_tiff(tiff_path):
                     "label": -1
                 }
                 geo_dict_list.append(geo_dict)
-
-        # logger.info(f"Generated geo dictionary with {len(geo_dict_list)} entries.")
         return geo_dict_list
 
     except rasterio.errors.RasterioIOError as e:
@@ -4051,7 +3624,6 @@ def get_geo_dict(tiff_path):
         json_file = f"{base_path}.json"
 
         # Attempt to load the existing geo dictionary
-        # logger.info(f"Checking for existing geo dict: {json_file}")
         existing_geo_dict = load_existing_geo_dict(json_file)
 
         if existing_geo_dict:
@@ -4096,7 +3668,6 @@ def get_geo_dict(tiff_path):
                     geojson["features"].append(feature)
             with open(json_file, 'w') as f:
                 json.dump(geojson, f, indent=4)
-                # logger.info(f"Geo dict saved to {json_file}")
                 print(f"Geo dict saved to ----> {json_file}")
             ##############################################
         except IOError as e:
@@ -4130,13 +3701,9 @@ def load_image(image_path, mode):
     """
     ##############################################################################
     data, geo_transform, spatial_ref, measurement_type, observ_nodata = None, [None], None, None, None
-
     ##############################################################################
-    # logger.info(f"Loading image from {image_path} with mode {mode}")
-
     def process_observation(observation_file, temp):
         nonlocal data, geo_transform, spatial_ref, measurement_type
-        # logger.info(f"Processing observation: {observation_file}")
         # Open the dataset with rasterio using a context manager.
         if temp != 1:
             with rasterio.open(observation_file) as src:
@@ -4178,7 +3745,6 @@ def load_image(image_path, mode):
                 # --- Correct vertical orientation if needed ---
                 # For a north-up image, pixel_height should be negative.
                 if pixel_height > 0:
-                    # logger.info("Pixel height is positive, flipping data vertically.")
                     data = np.flipud(data)
                     # Adjust the origin_y: new_origin_y = origin_y + (pixel_height * number_of_rows)
                     nrows = data.shape[0]
@@ -4188,7 +3754,6 @@ def load_image(image_path, mode):
                 # --- Correct horizontal orientation if needed ---
                 # For a north-up image, pixel_width is expected to be positive.
                 if pixel_width < 0:
-                    # logger.info("Pixel width is negative, flipping data horizontally.")
                     data = np.fliplr(data)
                     ncols = data.shape[1]
                     origin_x = origin_x + pixel_width * ncols
@@ -4544,8 +4109,6 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, timestamp, crs_e
         # Flush cache and close dataset
         dataset_ogm.FlushCache()
         dataset_ogm = None
-
-        # logger.info(f"GeoTIFF saved successfully at {output_file_path}")
         return metadata
 
     except Exception as e:
@@ -4763,7 +4326,6 @@ def update_occupancy_grid_flood(OGMData, OGM_gt_,
 
     # Extract the patch from OGMData.
     ogm_patch = OGMData[ogm_row_min:ogm_row_max + 1, ogm_col_min:ogm_col_max + 1]
-    # logger.info(f"ogm_patch:  {ogm_patch}")
 
     # --- 3. Upsample the OGM patch to observation resolution ---
     # We want the high-res patch to have the same dimensions as the observation.
@@ -4850,9 +4412,6 @@ def update_occupancy_grid_flood_sat_fixed(
     Returns an updated grid with the exact same shape as OGMData.
     """
     epsilon = 1e-9
-    # logger.info(f"Starting fusion (simple): OGM CRS={ogm_crs}, Observation CRS={observation_crs}")
-    # logger.info(f"OGM shape: {OGMData.shape}, Observation shape: {observation_data_.shape}")
-
     try:
         # Normalize CRS inputs
         ogm_crs = RioCRS.from_user_input(ogm_crs)
@@ -5220,32 +4779,14 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
         Process the occupancy grid, update the entity and upload the OGM to MinIO.
     """
 
-    # logger.info(f"inside process_and_upload_ogm entity_id ---> {entity_id}")
-    print(f"inside process_and_upload_ogm entity_id ---> {entity_id}")
-    # {config.BUCKET_NAME}/{global_cache.get("bm_id")}/{FileName}
     FileName = file_path_.split("/")[-1]
-    # object_name = (file_path_.split("/")[-1])
     object_name = (f'pdm05/'
                    f'{global_cache.get("bm_id")}/'
                    f'{FileName}')
-    # logger.info(f"Object name {object_name}")
-    # print(f"file path {file_path_}")
     try:
         minio_client.upload_file(bucket_name, object_name, file_path_)
-        # logger.info(f"File '{file_path_}' uploaded to bucket '{bucket_name}' successfully.")
-        # print(f"File '{file_path_}' uploaded to bucket '{bucket_name}' successfully.")
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
-    #############################################
-    # List Objects in a Bucket
-    #############################################
-    # try:
-    #     objects = minio_client.list_objects(bucket_name)
-    #     print(f"Objects in bucket '{bucket_name}': {objects}")
-    # except Exception as e:
-    #     print(f"Error listing objects in bucket: {e}")
-
-    ############################################
     try:
         response = update_entity(entity_id, metadata)
         if response:
