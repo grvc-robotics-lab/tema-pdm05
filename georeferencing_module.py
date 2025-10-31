@@ -153,18 +153,18 @@ def run_geo(output_path_, path_, flag, file_name,
     segmented_image = f'{image_path}.png'
     segmented_metadata_file = f'{image_path}_metadata.json'
 
-    ###############################################################
-    if not os.path.exists(segmented_image):
-        logger.error(f"Image file not found: {segmented_image}")
-        return
-    if not os.path.exists(segmented_metadata_file):
-        logger.error(f"Metadata file not found: {segmented_metadata_file}")
-        return
-    ###############################################################
-
+#     print(12)
     start_pixel = (0, 0)
     # Georeferencing the segmented image
     if flag == "segmented":
+        ###############################################################
+        if not os.path.exists(segmented_image):
+            logger.error(f"Image file not found: {segmented_image}")
+            return
+        if not os.path.exists(segmented_metadata_file):
+            logger.error(f"Metadata file not found: {segmented_metadata_file}")
+            return
+        ###############################################################
         # Retrieve the camera state from image metadata
         with open(segmented_metadata_file, 'r') as met_file:
             original_metadata = json.load(met_file)
@@ -286,7 +286,7 @@ def run_geo(output_path_, path_, flag, file_name,
             boxes_georeferencing = []
             for _ in range(len(bounding_boxes)):
                 # Find the center of mass pixel
-                cm_pixel = (min(int((bounding_boxes[_][1] + bounding_boxes[_][3]) / 2), img_height - 1),
+                cm_pixel = (min(int(bounding_boxes[_][3]), img_height - 1),
                             min(int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2), img_width - 1))
                 image_emp[cm_pixel[0], cm_pixel[1]] = 1
 
@@ -356,7 +356,7 @@ def create_metadata(json_data):
         "camera_parameters": {"fov": FOV, "height": img_height, "width": img_width},
         "gimbal_parameters": {"roll": gimbal_roll, "pitch": gimbal_pitch, "yaw": gimbal_yaw},
     }
-    print(ImageMetadata)
+#     print(ImageMetadata)
 
     return ImageMetadata
 

@@ -217,28 +217,31 @@ def notify():
         # MODIFIED: Should process others if we have alerts OR disaster type requires it
         # But if we're waiting for new non-alert entities, only process if we actually have non-alert entities
         should_process_others = (alert_was_received or disaster_type in ["Fire", "Flood"])
+        # -----------------------------------------------------------------
+        expiration = global_cache.get('expiration')
+        if expiration != "No info":
+            expiration_time = datetime.strptime(expiration, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+            current_time = datetime.now(timezone.utc)
+            # -----------------------------------------------------------------
+            if should_process_others and others and current_time < expiration_time:
+                logger.info(f"Processing {len(others)} non-Alert entities")
+                try:
+                    with ThreadPoolExecutor(max_workers=8) as executor:
+                        futures = []
+                        for notification in others:
+                            if "type" not in notification:
+                                logger.error(f"Missing 'type' in notification: {notification}", exc_info=True)
+                                continue
+                            futures.append(executor.submit(process_notification, notification))
 
-        if should_process_others and others:
-            logger.info(f"Processing {len(others)} non-Alert entities")
-
-            try:
-                with ThreadPoolExecutor(max_workers=8) as executor:
-                    futures = []
-                    for notification in others:
-                        if "type" not in notification:
-                            logger.error(f"Missing 'type' in notification: {notification}", exc_info=True)
-                            continue
-                        futures.append(executor.submit(process_notification, notification))
-
-                    for future in as_completed(futures):
-                        try:
-                            future.result()
-                            others_processed += 1
-                        except Exception as e:
-                            logger.error(f"Error in processing non-Alert notification: {e}", exc_info=True)
-
-            except Exception as e:
-                logger.warning(f"Issues in non-Alert entities processing: {e}")
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                                others_processed += 1
+                            except Exception as e:
+                                logger.error(f"Error in processing non-Alert notification: {e}", exc_info=True)
+                except Exception as e:
+                    logger.warning(f"Issues in non-Alert entities processing: {e}")
 
         # --- PHASE 4: CRITICAL FIX - Only start processing when we have non-alert entities AFTER an alert ---
         with global_cache_lock:
@@ -367,7 +370,7 @@ def handle_segmentation(notification):
         logger.warning(f"Not in the same BM {bm_id_from_notification}, File: {auth_filename}")
         return
 
-    if not auth_filename or not isinstance(auth_filename, dict):
+    if not auth_filename or not isinstance(auth_filename, dict) or not bucket:
         logger.warning("Invalid or missing 'segmentation' value in notification.")
         return
 
@@ -385,7 +388,6 @@ def handle_segmentation(notification):
         logger.warning(f"Could not determine file_path for file: {mask_id_temp}")
         return
 
-    os.makedirs(file_path, exist_ok=True)
     metadata_file_base = mask_id_temp.split('.')[0]
     metadata_file = f"{metadata_file_base}_metadata.json"
     json_file_path = None
@@ -684,9 +686,9 @@ def download_tif_file(entity, polygon):
             else:
                 logger.error("File download failed. via MINIO")
 
-            file_name = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
-            input_tif = file_name
+            input_tif = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
             output_tif = file_name
+
             try:
                 ring = polygon[0] if (isinstance(polygon, list) and polygon and isinstance(polygon[0], list)
                                       and polygon and isinstance(polygon[0][0], list)) else polygon
@@ -710,22 +712,32 @@ def download_tif_file(entity, polygon):
                     else:
                         poly_dst = poly_ll
 
-                    raster_extent = box(src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top)
+                    raster_extent = box(src.bounds.left,
+                                        src.bounds.bottom,
+                                        src.bounds.right,
+                                        src.bounds.top)
+
                     if not poly_dst.intersects(raster_extent):
-                        raise ValueError(
+                        logger.warning(
                             f"Polygon does not intersect raster extent. "
                             f"Raster bounds (in {raster_crs.to_string()}): {src.bounds}"
                         )
+                        return None
+
 
                     shapes = [mapping(poly_dst)]
-                    out_image, out_transform = mask(src, shapes=shapes, crop=True)
+                    out_image, out_transform = mask(src,
+                                                    shapes=shapes,
+                                                    crop=True,
+                                                    filled=False)
 
                     out_meta = src.meta.copy()
                     out_meta.update({
                         "driver": "GTiff",
                         "height": out_image.shape[1],
                         "width": out_image.shape[2],
-                        "transform": out_transform
+                        "transform": out_transform,
+                        "nodata": src.nodata if src.nodata is not None else 0
                     })
 
                 with rasterio.open(output_tif, "w", **out_meta) as dest:
@@ -736,11 +748,10 @@ def download_tif_file(entity, polygon):
 
             except Exception as e:
                 logger.warning(f"Sat image was not cropped due to: {e}")
-                return input_tif
+                return None
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to download file: {e}")
-            print(f"Failed to download file: {e}")
             return None
     except Exception as e:
             logger.warning(f"MinIO download failed: {e}, falling back to HTTP")
@@ -777,12 +788,13 @@ def download_tif_file(entity, polygon):
                             "driver": "GTiff",
                             "height": out_image.shape[1],
                             "width": out_image.shape[2],
-                            "transform": out_transform
+                            "transform": out_transform,
+                            "nodata": src.nodata if src.nodata is not None else 0
                         })
                         with rasterio.open(output_tif, "w", **out_meta) as dest:
                             dest.write(out_image)
                     ################################################
-                    return file_name
+                    return output_tif
 
                 except requests.exceptions.RequestException as e:
                     logger.error(f"Failed to download file via hyperref: {e}")
@@ -1293,6 +1305,8 @@ def subscribe_to_entities():
                 logger.info(f"Subscription for {entity_type} with ID {subscription_id} already exists.")
                 continue
 
+            logger.info(f"Creating subscription for {entity_type} with ID {subscription_id}")
+
             subscription_payload = subscription_payload_template.copy()
             subscription_payload["id"] = subscription_id
             subscription_payload["entities"] = [{"type": entity_type}]
@@ -1300,8 +1314,7 @@ def subscribe_to_entities():
             create_subscription(subscription_url, subscription_payload, headers)
 
     except Exception as e:
-        logger.exception("An error occurred during subscription management.")
-        print(f"An error occurred: {e}")
+        logger.exception(f"An error occurred during subscription management: {e}")
 
 
 def create_subscription(subscription_url, payload, headers):
@@ -1313,7 +1326,7 @@ def create_subscription(subscription_url, payload, headers):
             logger.error(
                 f"Failed to create subscription {payload['id']}. Status: {response.status_code}, Body: {response.text}")
     except Exception as e:
-        logger.exception(f"An error occurred while creating the subscription: {e}")
+        logger.error(f"Error creating subscription {payload['id']}: {e}")
 
 
 ##########################################################################
@@ -1860,7 +1873,7 @@ def estimate_nd_status():
             # with _upload_lock:
             now_2 = time.monotonic()
             if now_2 - _last_upload >= UPLOAD_INTERVAL:
-                logger.info(f" now time and latest_upload ----------> {now_2}   {_last_upload}")
+                # logger.info(f" now time and latest_upload ----------> {now_2}   {_last_upload}")
                 process_and_upload_ogm(ND_entity_ID,
                                        os.path.join("estimated_OGM", output_tiff_path_timestamp),
                                        config.BUCKET_NAME, metadata_timestamp)
@@ -1921,7 +1934,7 @@ def estimate_nd_status():
         # with _upload_lock:
         now_3 = time.monotonic()
         if now_3 - _last_upload >= UPLOAD_INTERVAL:
-            logger.info(f" now time and latest_upload ----------> {now_3}   {_last_upload}")
+            # logger.info(f" now time and latest_upload ----------> {now_3}   {_last_upload}")
             process_and_upload_ogm(ND_entity_ID,
                                    os.path.join("estimated_OGM", output_tiff_path_timestamp),
                                    config.BUCKET_NAME, metadata_timestamp)
@@ -1979,7 +1992,7 @@ def estimate_nd_status():
                     # with _upload_lock:
                     now_4 = time.monotonic()
                     if now_4 - _last_upload >= UPLOAD_INTERVAL:
-                        logger.info(f" now time and latest_upload ----------> {now_4}   {_last_upload}")
+                        # logger.info(f" now time and latest_upload ----------> {now_4}   {_last_upload}")
                         process_and_upload_ogm(ND_entity_ID, os.path.join("estimated_OGM", output_tiff_path_timestamp),
                                                config.BUCKET_NAME, metadata_timestamp)
                         _last_upload = now_4
@@ -2018,7 +2031,7 @@ def estimate_nd_status():
                     # with _upload_lock:
                     now_5 = time.monotonic()
                     if now_5 - _last_upload >= UPLOAD_INTERVAL:
-                        logger.info(f" now time and latest_upload ----------> {now_5}   {_last_upload}")
+                        # logger.info(f" now time and latest_upload ----------> {now_5}   {_last_upload}")
                         process_and_upload_ogm(ND_entity_ID, os.path.join("estimated_OGM", output_tiff_path_timestamp),
                                                config.BUCKET_NAME, metadata_timestamp)
                         _last_upload = now_5
@@ -2400,7 +2413,10 @@ def set_kf_states(kf_states: dict):
     """
     global_cache["kf_states"] = kf_states
 
-
+########################################################################################################################
+# ORIGINAL estimate_objects_status
+########################################################################################################################
+'''
 def estimate_objects_status():
     """
     1) Load existing OGM as GeoJSON.
@@ -2672,8 +2688,473 @@ def estimate_objects_status():
         logger.info(f"Uploading final OGM to cloud bucket: {config.BUCKET_NAME}")
         process_and_upload_ogm(obj_entity_ID, output_local_path, config.BUCKET_NAME, metadata)
         logger.info(f"OGM successfully processed and uploaded for GeoSocial Media: {output_local_path}")
+'''
 
 
+def estimate_objects_status():
+    """
+    1) Load existing OGM as GeoJSON.
+    2) Integrate Drone data (with Hungarian data association).
+    3) Apply a Kalman Filter to refine positions.
+    4) Integrate Social Media data (SinglePostResult) as GeoJSON (also via association).
+    5) Save final OGM (overwrite + timestamped, filtering label == -1 only from the timestamped).
+    6) Prepare metadata and upload the final result.
+    """
+
+    disaster_type = global_cache.get("natural_disaster", "NoDisaster")
+    if disaster_type == "NoDisaster":
+        logger.info("No valid disaster type. Aborting object status estimation.")
+        return
+
+    ogm_metadata_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}_Objects.json"
+    if not os.path.exists(ogm_metadata_path):
+        logger.info(f"OGM not found at {ogm_metadata_path}. Aborting.")
+        return
+
+    if not os.listdir("georeferenced_drone_images/detection"):
+        return
+
+    # Attempt to load the JSON file with additional debugging
+    try:
+        with open(ogm_metadata_path, "r") as f:
+            try:
+                ogm_metadata = json.load(f)
+            except json.JSONDecodeError as e:
+                # Seek back a little before the error position to get context
+                f.seek(max(0, e.pos - 100))
+                snippet = f.read(200)
+                logger.error(f"JSON decode error at pos {e.pos}: {e.msg}. Problematic snippet: {snippet}",
+                             exc_info=True)
+                return
+    except Exception as e:
+        logger.error(f"Error reading file {ogm_metadata_path}: {e}", exc_info=True)
+        return
+
+    ogm_features = ogm_metadata.get("features", [])
+
+    # Initialize object lifecycle properties for existing features
+    current_time = datetime.now()
+    for feat in ogm_features:
+        props = feat.setdefault("properties", {})
+        if "creation_time" not in props:
+            props["creation_time"] = current_time.isoformat()
+        if "update_count" not in props:
+            props["update_count"] = 0
+        if "last_update" not in props:
+            props["last_update"] = current_time.isoformat()
+
+    # (2) Integrate Drone Data (Association + update)
+    observ_metadata = get_geotiff_metadata_rasterio("georeferenced_drone_images/detection")
+    if observ_metadata and isinstance(observ_metadata, dict):
+        drone_features = observ_metadata.get("features", [])
+        distance_threshold = (int(config.OGM_OBJ_RESOLUTION) // 1)
+        matches = associate_features_with_measurements(
+            ogm_features,
+            drone_features,
+            distance_threshold
+        )
+
+        # — stash label, score, grid_center & raw_measurement
+        for (i_ogm, i_drone) in matches:
+            ogm_feat = ogm_features[i_ogm]
+            drone_feat = drone_features[i_drone]
+            props = ogm_feat.setdefault("properties", {})
+            df_props = drone_feat.get("properties", {})
+
+            # preserve original grid‐center
+            props["grid_center"] = ogm_feat["geometry"]["coordinates"].copy()
+            # record the exact drone measurement
+            props["raw_measurement"] = drone_feat["geometry"]["coordinates"].copy()
+            # carry over label & score
+            props["label"] = df_props.get("label", -1)
+            props["score"] = df_props.get("score", 0.0)
+            # Update lifecycle properties
+            props["last_update"] = current_time.isoformat()
+            props["update_count"] = props.get("update_count", 0) + 1
+
+        #################################################################
+        #################################################################
+        # (3) Apply Kalman Filter to each matched feature
+        for feat in ogm_features:
+            props = feat.get("properties", {})
+            meas = props.get("raw_measurement")
+            if meas is None:
+                continue  # skip unlabeled / unmatched
+
+            # initial state = grid center
+            init = np.array(props["grid_center"]).reshape((3, 1))
+            z = np.array(meas).reshape((3, 1))
+
+            # configure Kalman Filter
+            kf = KalmanFilter(state_dim=3, measurement_dim=3)
+            kf.x = init.copy()
+            # measurement noise (drone): ~4 cm
+            drone_sigma = 0.04
+            # process noise (grid spacing): half‐cell variance
+            grid_sigma = float(config.OGM_OBJ_RESOLUTION) / 2.0
+            kf.R = np.eye(3) * (drone_sigma ** 2)
+            kf.Q = np.eye(3) * (grid_sigma ** 2)
+            # initial state covariance: allow the filter to learn
+            kf.P = np.eye(3) * ((grid_sigma * 2) ** 2)
+
+            # run predict + update
+            kf.predict()
+            kf.update(z)
+
+            # write back the refined coordinate
+            refined = kf.x.flatten().tolist()
+            feat["geometry"]["coordinates"] = refined
+            props["kf_refined"] = refined
+
+        # NEW: Object Management after Drone Integration
+        logger.info(f"Before object management: {len(ogm_features)} objects")
+
+        # Remove stale objects (not updated for a long time)
+        ogm_features = remove_stale_objects(ogm_features, max_age_minutes=5)
+
+        # Merge close objects
+        ogm_features = merge_close_objects(ogm_features, merge_threshold=1.0)
+
+        logger.info(f"After object management: {len(ogm_features)} objects")
+
+        # Overwrite with processed results
+        with open(ogm_metadata_path, "w") as f:
+            json.dump(ogm_metadata, f, indent=4)
+
+        # -- Only filter label == -1 in the timestamped copy, not in the main one
+        filtered_metadata = copy.deepcopy(ogm_metadata)
+        original_count = len(filtered_metadata["features"])
+        filtered_metadata["features"] = [
+            ff for ff in filtered_metadata["features"]
+            if ff.get("properties", {}).get("label", -1) != -1
+        ]
+        new_count = len(filtered_metadata["features"])
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamped_name = f"occupancy_grid_map_{disaster_type}_Objects_{ts}.json"
+        with open(os.path.join("estimated_OGM", timestamped_name), "w") as f:
+            json.dump(filtered_metadata, f, indent=4)
+
+        ##################################################################################
+        # Save and Upload
+        ##################################################################################
+        final_ogm_path_obj = timestamped_name
+        natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
+        metadata = {
+            'title': 'Probability-Based Occupancy Grid Map',
+            'author': 'GRVC lab, University of Seville',
+            'description': (
+                f"Estimated occupancy grid map for the {natural_disaster} scenario, "
+                "used to track detected persons and vehicles."
+            ),
+            'creationDate': datetime.now().isoformat(),
+            "spatialReference": "EPSG:4326",
+            "file_name": f"pdm05/{global_cache.get('bm_id')}/{final_ogm_path_obj}",
+            "coordinates": global_cache.get('roi', [None]),
+            "XMin": 0,
+            "XRes": 0,
+            "YMax": 0,
+            "YRes": 0,
+            "bucket": config.BUCKET_NAME,
+            "bm_id": global_cache.get('bm_id'),
+            "sent": ts,
+            "ignitionPoints": {
+                "type": "GeoProperty",
+                "value": {
+                    "type": "Point",
+                    "coordinates": global_cache.get('ignitionPoints', [None])
+                }
+            },
+            "minio_url": (
+                f'https://{config.MINIO_ENDPOINT}/'
+                f'{config.BUCKET_NAME}/pdm5/{global_cache.get("bm_id")}/{final_ogm_path_obj}'
+            )
+        }
+        output_local_path = os.path.join("estimated_OGM", final_ogm_path_obj)
+
+        logger.info(f"Uploading final OGM to cloud bucket: {config.BUCKET_NAME}")
+        process_and_upload_ogm(
+            obj_entity_ID,
+            output_local_path,
+            config.BUCKET_NAME,
+            metadata
+        )
+        logger.info(
+            f"OGM successfully processed and uploaded with processed drone image: "
+            f"{output_local_path}"
+        )
+
+        logger.info("Drone data integrated (with data association).")
+    else:
+        logger.info("Drone metadata is empty or unavailable.")
+    ##################################################################################
+    # (4) Integrate Social Media SinglePostResult (Association + update)
+    social_media_dir = "downloads/SocialMedia"
+    if not os.path.isdir(social_media_dir):
+        logger.info("No SocialMedia directory found. Skipping.")
+    else:
+        single_post_files = [
+            f for f in os.listdir(social_media_dir)
+            if f.startswith("single_posts_results") and f.endswith(".geojson")
+        ]
+        single_post_files.sort()  # process in chronological order
+
+        for sm_file in single_post_files:
+            sm_path = os.path.join(social_media_dir, sm_file)
+            with open(sm_path, "r") as f:
+                sm_data = json.load(f)
+            sm_features = sm_data.get("features", [])
+
+            # Data association
+            matches = associate_features_with_measurements(
+                ogm_features, sm_features, distance_threshold=(int(config.OGM_OBJ_RESOLUTION) // 1)
+            )
+
+            for (i_ogm, i_sm) in matches:
+                ogm_feat = ogm_features[i_ogm]
+                sm_feat = sm_features[i_sm]
+                ogm_props = ogm_feat.setdefault("properties", {})
+                sm_props = sm_feat.get("properties", {})
+
+                existing_score = ogm_props.get("score", 0.0)
+                new_prob = sm_props.get("prob", 0.5)
+                fused_score = fuse_fire_probability(existing_score, new_prob, weight=0.5)
+                ogm_props["score"] = fused_score
+                ogm_props["label"] = sm_props.get("label", -1)
+                # Update lifecycle properties
+                ogm_props["last_update"] = current_time.isoformat()
+                ogm_props["update_count"] = ogm_props.get("update_count", 0) + 1
+
+            # Remove file after processing
+            os.remove(sm_path)
+
+        # NEW: Object Management after Social Media Integration
+        logger.info(f"Before social media object management: {len(ogm_features)} objects")
+
+        # Remove stale objects
+        ogm_features = remove_stale_objects(ogm_features, max_age_minutes=30)
+
+        # Merge close objects
+        ogm_features = merge_close_objects(ogm_features, merge_threshold=1.0)
+
+        logger.info(f"After social media object management: {len(ogm_features)} objects")
+
+        # Overwrite after SocialMedia integration
+        with open(ogm_metadata_path, "w") as f:
+            json.dump(ogm_metadata, f, indent=4)
+
+        # Filter out -1 in the timestamped copy
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ogm_metadata_path_timestamp = f"occupancy_grid_map_{disaster_type}_Objects_{ts}.json"
+        filtered_metadata = copy.deepcopy(ogm_metadata)
+        original_count = len(filtered_metadata["features"])
+        filtered_metadata["features"] = [
+            ff for ff in filtered_metadata["features"]
+            if ff.get("properties", {}).get("label", -1) != -1
+        ]
+        new_count = len(filtered_metadata["features"])
+        logger.info(f"Social Media => filtered out label == -1 for timestamped version: "
+                    f"old count={original_count}, new count={new_count}.")
+
+        with open(os.path.join("estimated_OGM", ogm_metadata_path_timestamp), "w") as f:
+            json.dump(filtered_metadata, f, indent=4)
+
+        logger.info("Social Media data integrated into OGM.")
+
+        # (5) Prepare metadata for upload
+        final_ogm_path_obj = ogm_metadata_path_timestamp
+        natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
+        metadata = {
+            'title': 'Probability-Based Occupancy Grid Map',
+            'author': 'GRVC lab, University of Seville',
+            'description': (
+                f"Estimated occupancy grid map for the {natural_disaster} scenario, "
+                "used to track detected persons and vehicles."
+            ),
+            'creationDate': datetime.now().isoformat(),
+            "spatialReference": "EPSG:4326",
+            "file_name": f"pdm05/{global_cache.get('bm_id')}/{final_ogm_path_obj}",
+            "coordinates": global_cache.get('roi', [None]),
+            "XMin": 0,
+            "XRes": 0,
+            "YMax": 0,
+            "YRes": 0,
+            "bucket": config.BUCKET_NAME,
+            "bm_id": global_cache.get('bm_id'),
+            "sent": ts,
+            "ignitionPoints": {
+                "type": "GeoProperty",
+                "value": {
+                    "type": "Point",
+                    "coordinates": global_cache.get('ignitionPoints', [None])
+                }
+            },
+            "minio_url": (
+                f'https://{config.MINIO_ENDPOINT}/'
+                f'{config.BUCKET_NAME}/pdm05/{global_cache.get("bm_id")}/{final_ogm_path_obj}'
+            )
+        }
+        output_local_path = os.path.join("estimated_OGM", final_ogm_path_obj)
+
+        logger.info(f"Uploading final OGM to cloud bucket: {config.BUCKET_NAME}")
+        process_and_upload_ogm(obj_entity_ID, output_local_path, config.BUCKET_NAME, metadata)
+        logger.info(f"OGM successfully processed and uploaded for GeoSocial Media: {output_local_path}")
+
+
+def remove_stale_objects(features, max_age_minutes=5, min_updates=1):
+    """
+    Remove objects that haven't been updated recently or have too few updates
+    """
+    current_time = datetime.now()
+    filtered_features = []
+
+    for feat in features:
+        props = feat.get("properties", {})
+
+        # Skip if missing essential properties
+        if "creation_time" not in props or "last_update" not in props:
+            continue
+
+        try:
+            # Calculate object age
+            creation_time = datetime.fromisoformat(props["creation_time"])
+            last_update = datetime.fromisoformat(props["last_update"])
+            update_count = props.get("update_count", 0)
+
+            object_age = (current_time - creation_time).total_seconds() / 60  # in minutes
+            time_since_update = (current_time - last_update).total_seconds() / 60  # in minutes
+
+            # Keep object if:
+            # 1. It has sufficient updates AND hasn't been stale for too long, OR
+            # 2. It's a recently created object (even with few updates)
+            if (update_count >= min_updates and time_since_update <= max_age_minutes) or \
+                    (object_age <= max_age_minutes / 2):  # Keep new objects for at least half the max age
+                filtered_features.append(feat)
+            else:
+                logger.debug(f"Removing stale object: age={object_age:.1f}m, "
+                             f"last_update={time_since_update:.1f}m, updates={update_count}")
+
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Error processing object lifecycle: {e}, keeping object")
+            filtered_features.append(feat)
+
+    removed_count = len(features) - len(filtered_features)
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} stale objects")
+
+    return filtered_features
+
+
+def merge_close_objects(features, merge_threshold=1.0):
+    """
+    Merge objects that are too close to each other
+    """
+    if len(features) <= 1:
+        return features
+
+    # Calculate distances between all objects
+    merged_features = []
+    merged_indices = set()
+
+    for i, feat1 in enumerate(features):
+        if i in merged_indices:
+            continue
+
+        coords1 = feat1["geometry"]["coordinates"]
+        props1 = feat1.get("properties", {})
+        merge_group = [feat1]
+
+        for j, feat2 in enumerate(features[i + 1:], start=i + 1):
+            if j in merged_indices:
+                continue
+
+            coords2 = feat2["geometry"]["coordinates"]
+            props2 = feat2.get("properties", {})
+
+            # Calculate Euclidean distance (ignore z-coordinate for 3D points)
+            distance = ((coords1[0] - coords2[0]) ** 2 +
+                        (coords1[1] - coords2[1]) ** 2) ** 0.5
+
+            if distance <= merge_threshold:
+                merge_group.append(feat2)
+                merged_indices.add(j)
+
+        if len(merge_group) > 1:
+            # Merge the group
+            merged_feat = merge_object_group(merge_group)
+            merged_features.append(merged_feat)
+            logger.debug(f"Merged {len(merge_group)} close objects")
+        else:
+            merged_features.append(feat1)
+
+    if len(merged_features) < len(features):
+        logger.info(f"Merged {len(features) - len(merged_features)} close objects")
+
+    return merged_features
+
+
+def merge_object_group(object_group):
+    """
+    Merge a group of close objects into a single object
+    """
+    if not object_group:
+        return None
+
+    # Calculate weighted average position based on confidence scores
+    total_weight = 0
+    weighted_coords = [0, 0, 0]
+    merged_props = {}
+
+    for obj in object_group:
+        coords = obj["geometry"]["coordinates"]
+        props = obj.get("properties", {})
+        weight = props.get("score", 0.5)  # Use confidence as weight
+
+        for i in range(3):
+            if i < len(coords):
+                weighted_coords[i] += coords[i] * weight
+        total_weight += weight
+
+    # Normalize coordinates
+    if total_weight > 0:
+        merged_coords = [wc / total_weight for wc in weighted_coords]
+    else:
+        # Fallback to simple average
+        merged_coords = [
+            sum(obj["geometry"]["coordinates"][i] for obj in object_group) / len(object_group)
+            for i in range(3)
+        ]
+
+    # Merge properties (take the best from the group)
+    first_props = object_group[0].get("properties", {})
+    merged_props = first_props.copy()
+
+    # Take maximum confidence score
+    merged_props["score"] = max(obj.get("properties", {}).get("score", 0) for obj in object_group)
+
+    # Take most recent label (non -1 if available)
+    labels = [obj.get("properties", {}).get("label", -1) for obj in object_group]
+    valid_labels = [label for label in labels if label != -1]
+    merged_props["label"] = valid_labels[0] if valid_labels else labels[0]
+
+    # Update lifecycle properties
+    merged_props["last_update"] = datetime.now().isoformat()
+    merged_props["update_count"] = sum(obj.get("properties", {}).get("update_count", 0)
+                                       for obj in object_group)
+
+    # Create merged feature
+    merged_feature = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Point",
+            "coordinates": merged_coords
+        },
+        "properties": merged_props
+    }
+
+    return merged_feature
+########################################################################################################################
+########################################################################################################################
 def get_geojson_bbox(geojson_path):
     """
     Calculate the bounding box of a GeoJSON file.

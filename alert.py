@@ -17,17 +17,35 @@ LD_HEADERS = {
 
 # New polygon coordinates
 NEW_POLYGON = [
-    [23.479676024, 38.787963173],
-    [23.483924327, 38.79507817],
-    [23.482363555, 38.799262473],
-    [23.47958039, 38.803064276],
-    [23.47073523, 38.801801291],
-    [23.470068075, 38.79860237],
-    [23.470787545, 38.795830983],
-    [23.471388948, 38.792343556],
-    [23.473816704, 38.789951543],
-    [23.479676024, 38.787963173],  # close ring
-]
+        [
+          6.996817325,
+          50.521793116
+        ],
+        [
+          6.982379622,
+          50.517755746
+        ],
+        [
+          6.976085293,
+          50.513526712
+        ],
+        [
+          6.980425116,
+          50.506469699
+        ],
+        [
+          6.995878527,
+          50.511398138
+        ],
+        [
+          6.996817325,
+          50.521793116
+        ],
+        [
+          6.996817325,
+          50.521793116
+        ]
+      ]
 
 
 def utc_now_iso() -> str:
@@ -43,7 +61,7 @@ def create_alert_entity(orion_url: str, entity_id: str):
     """Create an NGSI‑LD Alert entity with the new polygon."""
     bm_id_hash = hashlib.md5(entity_id.encode("utf-8")).hexdigest()
     sent_ts = utc_now_iso()
-    expires_ts = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    expires_ts = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     entity = {
         "id": entity_id,
@@ -137,15 +155,15 @@ if __name__ == "__main__":
     ORION_URL = "https://orion.tema.digital-enabler.eng.it"
 
     # Use a new unique ID with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    ALERT_ENTITY_ID = f"urn:ngsi-ld:Alert:test{timestamp}:greece:106"
-
+    timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    ALERT_ENTITY_ID = f"urn:ngsi-ld:tema:use:test_{timestamp}:brk"
+    # urn:ngsi-ld:tema:kamk:sv07:alert:brk:115
     alert_hash = hashlib.md5(ALERT_ENTITY_ID.encode("utf-8")).hexdigest()
     alert_resp = create_alert_entity(ORION_URL, ALERT_ENTITY_ID)
     print(f"✅ Alert created → {alert_resp.status_code}")
 
-    # --------------------------------------------------------------------
-    # 2) Create GroundSensorStats entity
-    # --------------------------------------------------------------------
-    stats_resp = create_ground_sensor_stats_entity(ORION_URL, id_date=alert_hash)
-    print(f"✅ GroundSensorStats created → {stats_resp.status_code}")
+    # # --------------------------------------------------------------------
+    # # 2) Create GroundSensorStats entity
+    # # --------------------------------------------------------------------
+    # stats_resp = create_ground_sensor_stats_entity(ORION_URL, id_date=alert_hash)
+    # print(f"✅ GroundSensorStats created → {stats_resp.status_code}")
