@@ -3001,7 +3001,7 @@ def estimate_objects_status():
         logger.info(f"OGM successfully processed and uploaded for GeoSocial Media: {output_local_path}")
 
 
-def remove_stale_objects(features, max_age_minutes=5, min_updates=1):
+def remove_stale_objects(features, max_age_minutes=2, min_updates=1):
     """
     Remove objects that haven't been updated recently or have too few updates
     """
@@ -3045,7 +3045,7 @@ def remove_stale_objects(features, max_age_minutes=5, min_updates=1):
     return filtered_features
 
 
-def merge_close_objects(features, merge_threshold=1.0):
+def merge_close_objects(features, merge_threshold=config.OGM_ND_RESOLUTION):
     """
     Merge objects that are too close to each other
     """
