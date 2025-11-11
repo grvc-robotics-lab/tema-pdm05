@@ -104,7 +104,7 @@ docker run -it --rm \
   -e BROKER_ENTITY_Maps4Fire_ID="urn:ngsi-ld:USE:PDM-05:Maps4Fire:" \
   -e BROKER_ENTITY_Maps4Object_ID="urn:ngsi-ld:USE:PDM-05:Maps4Object:" \
   -e BROKER_TYPE_ID="GeoTIFF" \
-  -e CALLBACK_NGROK="https://f2955dbbf912.ngrok-free.app" \
+  -e CALLBACK_NGROK="https://ab60cd880eaf.ngrok-free.app" \
   -e BROKER_SUBSCRIPTION_ID="subscription123" \
   -e MINIO_ENDPOINT="storage.tema.digital-enabler.eng.it:443" \
   -e MINIO_ACCESS_KEY="AUMFK4CGDFORW7PC9URA" \
@@ -116,8 +116,8 @@ docker run -it --rm \
   -e BASE_PATH="/pdm05/" \
   -e API_ENDPOINT="/notify/" \
   -e OpenTopography_api_key="56da0f69ae202d4d9414278b0f6537bd" \
-  -e OGM_OBJ_RESOLUTION="20" \
-  -e OGM_ND_RESOLUTION="20" \
+  -e OGM_OBJ_RESOLUTION="5" \
+  -e OGM_ND_RESOLUTION="5" \
   -e SCALING_FACTOR="1" \
-  inf_fusion:latest
+  ghcr.io/he-tema/inf_fusion_v02:6.28
 ```
