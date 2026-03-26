@@ -317,6 +317,7 @@ def create_metadata(json_data):
     the image metadata
     Camera Model Name
     '''
+
     model = json_data.get('Model', 'Camera Model Name ')
     lon_dms = json_data['GPSLongitude'].split()
     camera_lon = dms_to_decimal(lon_dms[0], lon_dms[2][:-1], lon_dms[3][:-2], lon_dms[4])
@@ -686,5 +687,5 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
 
     return image, geotransform, srs.ExportToWkt()
 
-#if __name__ == "__main__":
-#    main('Fire', 'segmented', 0.04)
+# if __name__ == "__main__":
+#    main('Flood', "bbox", 1.00)

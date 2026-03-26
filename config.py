@@ -54,6 +54,7 @@ OpenTopography_api_key = os.getenv("OpenTopography_api_key", '56da0f69ae202d4d94
 OGM_ND_RESOLUTION = os.getenv("OGM_ND_RESOLUTION", 5)
 OGM_OBJ_RESOLUTION = os.getenv("OGM_OBJ_RESOLUTION", 5)
 SCALING_FACTOR = os.getenv("SCALING_FACTOR", 1)
+TRACK_CONFIRM_UPDATES = os.getenv("TRACK_CONFIRM_UPDATES", 1)
 
 if not OpenTopography_api_key:
     logger.error("No OpenTopography_api_key")

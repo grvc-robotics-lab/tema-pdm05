@@ -72,6 +72,8 @@ subscriptions_to_delete = [
     ################################################
     # "urn:ngsi-ld:tema:subscription:USE:SV01:001",
     # "urn:ngsi-ld:tema:subscription:USE:SV01:002"
+    # "urn:ngsi-ld:tema:subscription:USE:SV01:UAV_01:alert:001"
+    # "urn:ngsi-ld:tema:subscription:USE:SV01:UAV_01:alert:001"
 ]
 
 # Delete Subscriptions

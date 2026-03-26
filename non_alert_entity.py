@@ -16,46 +16,46 @@ LD_HEADERS = {
 }
 
 # New polygon coordinates
-NEW_POLYGON = [
-        [
-          6.996817325,
-          50.521793116
-        ],
-        [
-          6.982379622,
-          50.517755746
-        ],
-        [
-          6.976085293,
-          50.513526712
-        ],
-        [
-          6.980425116,
-          50.506469699
-        ],
-        [
-          6.995878527,
-          50.511398138
-        ],
-        [
-          6.996817325,
-          50.521793116
-        ],
-        [
-          6.996817325,
-          50.521793116
-        ]
-      ]
-# KML coordinates are (lon, lat)
 # NEW_POLYGON = [
-#     [8.629771764829439, 40.15859418187855],
-#     [8.625061440063686, 40.15812980346134],
-#     [8.622634553547057, 40.15561452675333],
-#     [8.626133607094404, 40.15261485269694],
-#     [8.632394881928512, 40.1533949156366],
-#     [8.633083570598743, 40.15730750244064],
-#     [8.629771764829439, 40.15859418187855],  # closed ring (same as first)
-# ]
+#         [
+#           6.996817325,
+#           50.521793116
+#         ],
+#         [
+#           6.982379622,
+#           50.517755746
+#         ],
+#         [
+#           6.976085293,
+#           50.513526712
+#         ],
+#         [
+#           6.980425116,
+#           50.506469699
+#         ],
+#         [
+#           6.995878527,
+#           50.511398138
+#         ],
+#         [
+#           6.996817325,
+#           50.521793116
+#         ],
+#         [
+#           6.996817325,
+#           50.521793116
+#         ]
+#       ]
+# KML coordinates are (lon, lat)
+NEW_POLYGON = [
+    [8.629771764829439, 40.15859418187855],
+    [8.625061440063686, 40.15812980346134],
+    [8.622634553547057, 40.15561452675333],
+    [8.626133607094404, 40.15261485269694],
+    [8.632394881928512, 40.1533949156366],
+    [8.633083570598743, 40.15730750244064],
+    [8.629771764829439, 40.15859418187855],  # closed ring (same as first)
+]
 
 
 def utc_now_iso() -> str:
@@ -68,14 +68,14 @@ def utc_now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 def create_alert_entity(orion_url: str, entity_id: str):
-    """Create an NGSI‑LD Alert entity with the new polygon."""
+    """Create an NGSI‑LD PersonVehicleDetection entity with the new polygon."""
     bm_id_hash = hashlib.md5(entity_id.encode("utf-8")).hexdigest()
     sent_ts = utc_now_iso()
     expires_ts = (datetime.now(timezone.utc) + timedelta(minutes=120)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     entity = {
         "id": entity_id,
-        "type": "Alert",
+        "type": "PersonVehicleDetection",
         "area": {
             "type": "GeoProperty",
             "value": {"type": "Polygon", "coordinates": [NEW_POLYGON]},
@@ -85,13 +85,13 @@ def create_alert_entity(orion_url: str, entity_id: str):
         "category": {"type": "Property", "value": "Safety"},
         "certainty": {"type": "Property", "value": "Observed"},
         "effective": {"type": "Property", "value": sent_ts},
-        "event": {"type": "Property", "value": "Flood"},
+        "event": {"type": "Property", "value": "Fire"},
         "expires": {"type": "Property", "value": expires_ts},
         "ignitionPoints": {
             "type": "GeoProperty",
             "value": {"type": "Point", "coordinates": [-5.99823, 37.42509]},  # update if needed
         },
-        "msgType": {"type": "Property", "value": "Alert"},
+        "msgType": {"type": "Property", "value": "PersonVehicleDetection"},
         "sender": {"type": "Property", "value": "alert@tema-project.eu"},
         "sent": {"type": "Property", "value": sent_ts},
         "severity": {"type": "Property", "value": "Severe"},
@@ -123,7 +123,7 @@ def create_ground_sensor_stats_entity(orion_url: str, id_date: str, date_modifie
             "type": "Property",
             "value": "NetCDF file containing sensor measurements from TEMA ground stations.",
         },
-        "title": {"type": "Property", "value": "Summary Statistics for Flood Campaign"},
+        "title": {"type": "Property", "value": "Summary Statistics for Fire Campaign"},
         "aoi": {
             "type": "Property",
             "value": {
@@ -170,7 +170,7 @@ if __name__ == "__main__":
     # urn:ngsi-ld:tema:kamk:sv07:alert:brk:115
     alert_hash = hashlib.md5(ALERT_ENTITY_ID.encode("utf-8")).hexdigest()
     alert_resp = create_alert_entity(ORION_URL, ALERT_ENTITY_ID)
-    print(f"✅ Alert created → {alert_resp.status_code}")
+    print(f"✅ PersonVehicleDetection created → {alert_resp.status_code}")
 
     # # --------------------------------------------------------------------
     # # 2) Create GroundSensorStats entity

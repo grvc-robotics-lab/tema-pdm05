@@ -1,73 +1,3 @@
-# import numpy as np
-# from numpy.linalg import LinAlgError
-#
-# class KalmanFilter:
-#     def __init__(self, state_dim, measurement_dim,
-#                  F=None, H=None, Q=None, R=None, P=None, x0=None):
-#         """
-#         A generic linear Kalman Filter.
-#         """
-#         self.state_dim = state_dim
-#         self.measurement_dim = measurement_dim
-#
-#         # F: State transition
-#         self.F = F if F is not None else np.eye(state_dim)
-#
-#         # H: Measurement matrix
-#         if H is None:
-#             if measurement_dim != state_dim:
-#                 raise ValueError("Default H requires measurement_dim == state_dim.")
-#             self.H = np.eye(measurement_dim, state_dim)
-#         else:
-#             self.H = H
-#
-#         # Q: Process noise
-#         self.Q = Q if Q is not None else np.eye(state_dim) * 1e-8
-#         # R: Measurement noise
-#         self.R = R if R is not None else np.eye(measurement_dim) * 1e-8
-#         # P: Estimate uncertainty
-#         self.P = P if P is not None else np.eye(state_dim) * 1.0
-#         # x0: Initial state
-#         self.x = x0 if x0 is not None else np.zeros((state_dim, 1))
-#
-#     def predict(self):
-#         # Predict next state
-#         self.x = self.F @ self.x
-#         # Predict next covariance
-#         self.P = self.F @ self.P @ self.F.T + self.Q
-#
-#     def update(self, z):
-#         # z should be shape (measurement_dim, 1)
-#         y = z - (self.H @ self.x)            # innovation
-#         S = self.H @ self.P @ self.H.T + self.R  # innovation covariance
-#         # Check for near-singular S
-#         cond_num = np.linalg.cond(S)
-#         if cond_num > 1 / np.finfo(S.dtype).eps:
-#             raise LinAlgError("Residual covariance is near-singular or ill-conditioned.")
-#
-#         K = self.P @ self.H.T @ np.linalg.inv(S) # Kalman gain
-#         self.x = self.x + (K @ y)                # update state
-#         I = np.eye(self.state_dim)
-#         self.P = (I - K @ self.H) @ self.P       # update covariance
-#
-#     def set_process_noise(self, Q):
-#         self.Q = Q
-#
-#     def set_measurement_noise(self, R):
-#         self.R = R
-#
-#     def set_initial_state(self, x0, P0=None):
-#         self.x = x0
-#         if P0 is not None:
-#             self.P = P0
-#
-#     def get_state(self):
-#         """
-#         Returns the current state estimate as a 1D array.
-#         """
-#         return self.x.flatten()
-
-
 """
 Kalman Filter (linear) — enhanced implementation.
 
@@ -146,11 +76,11 @@ class KalmanFilter:
             raise ValueError(f"H must have shape {(self.measurement_dim, self.state_dim)}, got {self.H.shape}.")
 
         # Defaults are placeholders; tune for your application.
-        self.Q = np.array(Q if Q is not None else np.eye(self.state_dim) * 1e-8, dtype=dtype, copy=True)
+        self.Q = np.array(Q if Q is not None else np.eye(self.state_dim) * 1e-3, dtype=dtype, copy=True)
         if self.Q.shape != (self.state_dim, self.state_dim):
             raise ValueError(f"Q must have shape {(self.state_dim, self.state_dim)}, got {self.Q.shape}.")
 
-        self.R = np.array(R if R is not None else np.eye(self.measurement_dim) * 1e-8, dtype=dtype, copy=True)
+        self.R = np.array(R if R is not None else np.eye(self.measurement_dim) * 1e-2, dtype=dtype, copy=True)
         if self.R.shape != (self.measurement_dim, self.measurement_dim):
             raise ValueError(f"R must have shape {(self.measurement_dim, self.measurement_dim)}, got {self.R.shape}.")
 
@@ -373,4 +303,3 @@ class KalmanFilter:
         Returns None entries if update was skipped or not yet called.
         """
         return self._last_y, self._last_S, self._last_K
-
