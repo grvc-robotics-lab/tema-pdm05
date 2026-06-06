@@ -87,6 +87,7 @@ class GlobalCache:
         self.waiting_for_non_alert = False
         self.ogm_flag = False
         self.ogm_counter = 0
+        self.initial_nd_ogm_metadata = None
 
         self.objects_tracking_started = False
     def get(self, key, default=None):
@@ -127,7 +128,7 @@ objects_file_locks_lock = threading.Lock()
 cleanup_lock = threading.Lock()
 # --------------------------------------------------------
 # initialize at module level
-UPLOAD_INTERVAL = 5 * 60.0
+UPLOAD_INTERVAL = float(config.OGM_UPLOAD_INTERVAL_SEC)
 _last_upload = time.monotonic() - UPLOAD_INTERVAL
 _upload_lock = threading.Lock()
 # --------------------------------------------------------
@@ -1106,6 +1107,7 @@ def initialize_processing():
                         global_cache.update(
                             ogm_flag=False,
                             ogm_counter=0,
+                            initial_nd_ogm_metadata=None,
                             kf_states={},
                             objects_tracking_started=False
                         )
@@ -1155,10 +1157,6 @@ def initialize_processing():
                             except Exception as e:
                                 logger.warning(f"Could not delete/recreate log file: {e}")
 
-                        # Initialize NGSI-LD entities and base state.
-                        initialize_entities()
-                        entities_initialized = True
-
                         # Initialize OGM/ROI for the new alert scenario (once).
                         if not global_cache.get('ogm_flag'):
                             try:
@@ -1175,7 +1173,7 @@ def initialize_processing():
                                             api_key=config.OpenTopography_api_key,
                                             output_file=output_dem_file,
                                             coordinates=polygon_coordinates,
-                                            dem_dataset="SRTMGL1"
+                                            dem_dataset="COP30" #"SRTMGL1"
                                         )
                                     except Exception as e:
                                         logger.warning(f"DEM download failed: {e}")
@@ -1188,6 +1186,7 @@ def initialize_processing():
                                         result = mask_geotiff_with_polygon_exact(ogm_path_ND, global_cache.get('roi'), ogm_path_ND)
                                         if result:
                                             logger.info(f"Masked GeoTIFF saved to {result}")
+                                            publish_initial_nd_ogm(disaster_type, ogm_path_ND)
                                         else:
                                             logger.warning("Masking ND OGM failed.")
                                     except Exception as e:
@@ -1218,6 +1217,19 @@ def initialize_processing():
                                     logger.info(f"Skipping OGM init for disaster type {disaster_type}")
                             except Exception as e:
                                 logger.warning(f"Error in OGM initialization: {e}")
+
+                        # Initialize NGSI-LD entities after the initial OGM is ready, so the
+                        # Maps4* creation payload can point to an uploaded map file.
+                        initialize_entities()
+                        disaster_type = global_cache.get('natural_disaster', 'No disaster info')
+                        if disaster_type in ["Fire", "Flood"] and not global_cache.get('initial_nd_ogm_metadata'):
+                            entities_initialized = False
+                            logger.error(
+                                "Scenario initialization is incomplete: initial ND OGM metadata is missing. "
+                                "Skipping fusion until a valid Alert reset creates and uploads the initial OGM."
+                            )
+                        else:
+                            entities_initialized = True
 
                         # Record which alert we reset for.
                         last_reset_alert_key = alert_key
@@ -1546,7 +1558,8 @@ def predict_ogm_fire(
         horizon_hours=1.0,
         method="probabilistic",
         sim_weight=0.35,
-        transition_hours=0.25):
+        transition_hours=0.1,
+        state_path=None):
     """
     Fuse FireSim Arrival Time output into the current-state fire OGM.
 
@@ -1557,9 +1570,11 @@ def predict_ogm_fire(
     - lower values mean earlier arrival
     - nodata marks cells outside the simulated domain
 
-    For current-state fusion, only the earliest predicted spread should be used.
-    So this function converts the arrival-time raster into a near-term probability
-    layer and fuses that softly into the existing occupancy OGM.
+    The first FireSim notification initializes the forecast sequence but does
+    not update the current-state OGM. From the second notification onward, only
+    the perimeter of the selected FireSim isochrone is fused. Older isochrones
+    are treated as already passed by the front and therefore act as inverse
+    evidence for current active fire.
 
     Args:
         occupancy_path (str): Path to the current occupancy OGM GeoTIFF.
@@ -1567,8 +1582,10 @@ def predict_ogm_fire(
         arrival_time_path (str): Path to FireSim Arrival Time GeoTIFF.
                                  Values are expected in hours.
         output_path (str): Path to save the fused OGM.
-        horizon_hours (float): Cells with arrival time <= this value are treated
-                               as strongest near-term fire evidence.
+        horizon_hours (float): FireSim notification step in hours. The first
+                               FireSim notification initializes the sequence
+                               at hour 0, the second uses hour 1, the third
+                               uses hour 2, and so on.
                                Default: 1.0 hour.
         method (str): Fusion method.
                       - "probabilistic": weighted probabilistic union
@@ -1578,12 +1595,11 @@ def predict_ogm_fire(
                             Since this is forecast information, it should
                             usually be weaker than direct observations.
                             Recommended range: 0.2 to 0.5
-        transition_hours (float): Optional soft transition beyond `horizon_hours`.
-                                  Example:
-                                  - arrival <= 1.0  -> full evidence
-                                  - 1.0 < arrival <= 1.25 -> linearly taper to 0
-                                  - arrival > 1.25 -> no evidence
-                                  Default: 0.25 hours
+        transition_hours (float): Total temporal width of the perimeter band
+                                  centered on the selected hour isochrone.
+                                  Default: 0.25 hours.
+        state_path (str | None): Optional JSON file storing how many FireSim
+                                 notifications have already been processed.
 
     Returns:
         None. Writes the fused raster to `output_path`.
@@ -1591,6 +1607,50 @@ def predict_ogm_fire(
     sim_weight = float(np.clip(sim_weight, 0.0, 1.0))
     horizon_hours = float(max(horizon_hours, 0.0))
     transition_hours = float(max(transition_hours, 0.0))
+    firesim_step = 1
+
+    if state_path and os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+            firesim_step = int(state.get("notification_count", 0)) + 1
+        except Exception as e:
+            logger.warning(f"Failed to load FireSim notification state from {state_path}: {e}")
+            firesim_step = 1
+
+    target_hour = max(horizon_hours * (firesim_step - 1), 0.0)
+    band_half_width = max(transition_hours / 2.0, 0.0)
+    passed_burnt_cap = 0.30
+
+    if firesim_step == 1:
+        if output_path != occupancy_path:
+            with rasterio.open(occupancy_path) as src1:
+                data1 = src1.read(1).astype(np.float32)
+                dst_profile = src1.profile
+            dst_profile.update(dtype=rasterio.float32, count=1)
+            with rasterio.open(output_path, "w", **dst_profile) as dst:
+                dst.write(data1, 1)
+
+        if state_path:
+            try:
+                os.makedirs(os.path.dirname(state_path), exist_ok=True)
+                with open(state_path, "w", encoding="utf-8") as fh:
+                    json.dump(
+                        {
+                            "notification_count": firesim_step,
+                            "current_hour": 0.0,
+                            "next_fused_hour": horizon_hours
+                        },
+                        fh
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to save FireSim notification state to {state_path}: {e}")
+
+        logger.info(
+            f"FireSim notification initialized without OGM fusion: {arrival_time_path}, "
+            f"firesim_step={firesim_step}, next_fused_hour={horizon_hours}"
+        )
+        return
 
     # ------------------------------------------------------------------
     # Step 1: Read FireSim Arrival Time raster
@@ -1609,26 +1669,28 @@ def predict_ogm_fire(
         valid2 &= (arrival != src2_nodata)
 
     # ------------------------------------------------------------------
-    # Step 2: Convert arrival time into near-term simulation probability
+    # Step 2: Convert arrival time into current-front support and passed-area mask
     # ------------------------------------------------------------------
     sim_prob = np.zeros_like(arrival, dtype=np.float32)
+    passed_mask_src = np.zeros_like(arrival, dtype=np.float32)
 
     if np.any(valid2):
-        if transition_hours > 0.0:
-            full_mask = valid2 & (arrival <= horizon_hours)
-            taper_mask = valid2 & (arrival > horizon_hours) & (
-                    arrival <= horizon_hours + transition_hours
-            )
+        if target_hour > 0.0:
+            passed_mask_src[valid2 & (arrival < target_hour)] = 1.0
 
-            sim_prob[full_mask] = 1.0
-            sim_prob[taper_mask] = 1.0 - (
-                    (arrival[taper_mask] - horizon_hours) / transition_hours
-            )
+        if band_half_width > 0.0:
+            band_distance = np.abs(arrival - target_hour)
+            # Keep FireSim active support on the current isochrone/front edge.
+            # Cells inside the isochrone are already passed/burnt.
+            front_mask = valid2 & (arrival >= target_hour) & (band_distance <= band_half_width)
+            sim_prob[front_mask] = 1.0 - (band_distance[front_mask] / band_half_width)
         else:
-            sim_prob[valid2 & (arrival <= horizon_hours)] = 1.0
+            front_mask = valid2 & np.isclose(arrival, target_hour, atol=1e-6)
+            sim_prob[front_mask] = 1.0
 
     sim_prob = np.where(valid2, sim_prob, 0.0).astype(np.float32)
     sim_prob = np.clip(sim_prob, 0.0, 1.0)
+    passed_mask_src = np.where(valid2, passed_mask_src, 0.0).astype(np.float32)
 
     # ------------------------------------------------------------------
     # Step 3: Read current-state occupancy OGM
@@ -1643,9 +1705,10 @@ def predict_ogm_fire(
     data1 = np.clip(data1, 0.0, 1.0)
 
     # ------------------------------------------------------------------
-    # Step 4: Reproject simulation probability onto the OGM grid
+    # Step 4: Reproject current-front support and passed-area mask onto the OGM grid
     # ------------------------------------------------------------------
     reprojected_sim = np.full(dst_shape, np.nan, dtype=np.float32)
+    reprojected_passed = np.full(dst_shape, np.nan, dtype=np.float32)
 
     reproject(
         source=sim_prob,
@@ -1658,9 +1721,21 @@ def predict_ogm_fire(
         dst_nodata=np.nan,
         resampling=Resampling.nearest
     )
+    reproject(
+        source=passed_mask_src,
+        destination=reprojected_passed,
+        src_transform=src2_transform,
+        src_crs=src2_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        src_nodata=None,
+        dst_nodata=np.nan,
+        resampling=Resampling.nearest
+    )
 
     valid_sim = np.isfinite(reprojected_sim)
     reprojected_sim = np.where(valid_sim, np.clip(reprojected_sim, 0.0, 1.0), 0.0)
+    passed_mask = np.isfinite(reprojected_passed) & (reprojected_passed > 0.5)
 
     # Forecast evidence should be weaker than direct observations
     weighted_sim = sim_weight * reprojected_sim
@@ -1670,12 +1745,15 @@ def predict_ogm_fire(
     # ------------------------------------------------------------------
     combined_data = data1.copy()
 
+    if passed_mask.any():
+        combined_data[passed_mask] = np.minimum(combined_data[passed_mask], passed_burnt_cap)
+
     if method.lower() == "probabilistic":
         combined_data[valid_sim] = 1.0 - (
-                (1.0 - data1[valid_sim]) * (1.0 - weighted_sim[valid_sim])
+                (1.0 - combined_data[valid_sim]) * (1.0 - weighted_sim[valid_sim])
         )
     else:
-        combined_data[valid_sim] = data1[valid_sim] + weighted_sim[valid_sim]
+        combined_data[valid_sim] = combined_data[valid_sim] + weighted_sim[valid_sim]
         combined_data = np.clip(combined_data, 0.0, 1.0)
 
     combined_data = np.clip(combined_data, 0.0, 1.0).astype(np.float32)
@@ -1688,10 +1766,25 @@ def predict_ogm_fire(
     with rasterio.open(output_path, "w", **dst_profile) as dst:
         dst.write(combined_data, 1)
 
+    if state_path:
+        try:
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "notification_count": firesim_step,
+                        "current_hour": target_hour
+                    },
+                    fh
+                )
+        except Exception as e:
+            logger.warning(f"Failed to save FireSim notification state to {state_path}: {e}")
+
     logger.info(
-        f"Fire OGM fused with Arrival Time raster: {arrival_time_path}, "
-        f"horizon_hours={horizon_hours}, transition_hours={transition_hours}, "
-        f"sim_weight={sim_weight}, method={method}"
+        f"Fire OGM fused with FireSim isochrone perimeter: {arrival_time_path}, "
+        f"firesim_step={firesim_step}, target_hour={target_hour}, "
+        f"band_width_hours={transition_hours}, sim_weight={sim_weight}, "
+        f"passed_burnt_cap={passed_burnt_cap}, method={method}"
     )
 
 # -----------------------------------------------------------------
@@ -1703,6 +1796,66 @@ def should_upload_now():
             _last_upload = now
             return True
         return False
+# -----------------------------------------------------------------
+def publish_initial_nd_ogm(disaster_type, ogm_path):
+    """
+    Upload the neutral OGM generated during alert initialization so the newly
+    created Maps4* entity points to a real map file from the start.
+    """
+    global _last_upload
+
+    if not os.path.exists(ogm_path):
+        logger.warning(f"Initial OGM upload skipped; file does not exist: {ogm_path}")
+        return
+
+    try:
+        with rasterio.open(ogm_path) as src:
+            ogm_data = src.read(1).astype(np.float32)
+            transform = src.transform
+            crs = src.crs
+
+        ogm_gt = (
+            transform.c,
+            transform.a,
+            transform.b,
+            transform.f,
+            transform.d,
+            transform.e,
+        )
+        crs_epsg = crs.to_epsg() if crs else 4326
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        initial_file_name = f"occupancy_grid_map_{disaster_type}_initial_{timestamp}.tif"
+
+        metadata = save_geotiff(
+            "estimated_OGM",
+            initial_file_name,
+            ogm_data,
+            ogm_gt,
+            timestamp,
+            crs_epsg=crs_epsg or 4326,
+        )
+
+        if not metadata:
+            logger.warning("Initial OGM upload skipped; metadata generation failed.")
+            return
+
+        if metadata.get('coordinates') != global_cache.get('roi'):
+            logger.warning("Initial OGM upload skipped; metadata ROI does not match current alert ROI.")
+            return
+
+        file_path = os.path.join("estimated_OGM", initial_file_name)
+        object_name = f'pdm05/{global_cache.get("bm_id")}/{initial_file_name}'
+        minio_client.upload_file(config.BUCKET_NAME, object_name, file_path)
+        global_cache.set('initial_nd_ogm_metadata', metadata)
+
+        with _upload_lock:
+            _last_upload = time.monotonic()
+
+        logger.info(f"Initial neutral OGM uploaded and staged for entity creation: {initial_file_name}")
+
+    except Exception as e:
+        logger.error(f"Error publishing initial OGM: {e}", exc_info=True)
+
 # -----------------------------------------------------------------
 def get_nd_lock(disaster_type):
     """Get a lock for a specific disaster type's OGM files"""
@@ -1723,6 +1876,7 @@ def estimate_nd_status():
     # ----------------------------------------------------------
     with get_nd_lock(disaster_type):
         ogm_path = f"estimated_OGM/occupancy_grid_map_{disaster_type}.tif"
+        firesim_state_path = os.path.join("downloads", "FireSim", "firesim_notification_state.json")
         # ----------------------------------------------------------
         # Prediction step
         # ----------------------------------------------------------
@@ -1763,7 +1917,8 @@ def estimate_nd_status():
                             horizon_hours=1.0,
                             method="probabilistic",
                             sim_weight=0.35,
-                            transition_hours=0.25)
+                            transition_hours=0.25,
+                            state_path=firesim_state_path)
                         logger.info("prediction is performed")
                         # ----------------------------------------------------------
                         result = mask_geotiff_with_polygon_exact(ogm_path, global_cache.get('roi'), ogm_path)
@@ -3732,8 +3887,17 @@ def initialize_entities():
         # Set the object entity ID
         obj_entity_ID = config.ENTITY_Maps4Object_ID + f'{global_cache.get("bm_id")}'
 
-        # List of entities to process
-        entity_ids = [ND_entity_ID, obj_entity_ID] if ND_entity_ID else [obj_entity_ID]
+        # List of entities to process. The ND map entity must only be created
+        # after the initial neutral OGM has been uploaded and staged.
+        entity_ids = [obj_entity_ID]
+        if ND_entity_ID:
+            if global_cache.get('initial_nd_ogm_metadata'):
+                entity_ids.insert(0, ND_entity_ID)
+            else:
+                logger.error(
+                    f"Skipping ND entity creation for {ND_entity_ID}: "
+                    "initial OGM upload metadata is missing."
+                )
 
         for entity_id in entity_ids:
             if not check_entity_exists(entity_id):
@@ -3785,6 +3949,26 @@ def check_entity_exists(entity_id_):
 # ------------------------------------------------------------------------------
 # Create Entity
 # ------------------------------------------------------------------------------
+def _valid_lonlat_point(coordinates):
+    if not isinstance(coordinates, (list, tuple)) or len(coordinates) < 2:
+        return False
+    try:
+        float(coordinates[0])
+        float(coordinates[1])
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_polygon_coordinates(coordinates):
+    if not isinstance(coordinates, list) or not coordinates:
+        return False
+    ring = coordinates[0]
+    if not isinstance(ring, list) or len(ring) < 4:
+        return False
+    return all(_valid_lonlat_point(point) for point in ring)
+
+
 def create_entity(entity_ID, entity_type_):
     natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
     logger.info("Attempting to create entity...")  # Log for debugging
@@ -3799,6 +3983,19 @@ def create_entity(entity_ID, entity_type_):
     if check_entity_exists(entity_ID):
         logger.info(f"Entity {entity_ID} already exists.")
         return {"status": "Entity already exists"}, 409
+
+    ignition_points = global_cache.get('ignitionPoints', None)
+    roi_coordinates = global_cache.get('roi', None)
+    if not _valid_polygon_coordinates(roi_coordinates):
+        roi_coordinates = [
+            [
+                [-180.0, -90.0],
+                [-180.0, 90.0],
+                [180.0, 90.0],
+                [180.0, -90.0],
+                [-180.0, -90.0]
+            ]
+        ]
 
     data = {
         "id": entity_ID,
@@ -3834,56 +4031,41 @@ def create_entity(entity_ID, entity_type_):
         },
         "location": {
             "type": "Polygon",
-            "coordinates": [
-                [
-                    [-180.0, -90.0],
-                    [-180.0, 90.0],
-                    [180.0, 90.0],
-                    [180.0, -90.0],
-                    [-180.0, -90.0]
-                ]
-            ]
+            "coordinates": roi_coordinates
         },
-        # "location": {
-        #     "type": "Polygon",
-        #     "coordinates": [
-        #         [
-        #             [-0.165825, 51.495065],
-        #             [-0.165825, 51.513123],
-        #             [-0.111065, 51.513123],
-        #             [-0.111065, 51.495065],
-        #             [-0.165825, 51.495065]
-        #         ]
-        #     ]
-        # },
-        "minio_url": {
-            "type": "Property",
-            "value": f'https://{config.MINIO_ENDPOINT}/{config.BUCKET_NAME}/{global_cache.get("bm_id")}/occupancy_grid_map{natural_disaster}.tif'
-        },
-        "filename": {
-            "type": "Property",
-            "value": f"occupancy_grid_map_{natural_disaster}.tif"
-        },
-        "bucket": {
-            "type": "Property",
-            "value": "use"
-        },
-        "sent": {
-            "type": "Property",
-            "value": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.localtime())
-        },
-        # "ignitionPoints":{
-        #     "type": "GeoProperty",
-        #     "value": {
-        #         "type": "Point",
-        #         "coordinates": [0.0, 0.0]
-        #     }
-        # },
         "bm_id": global_cache.get("bm_id"),
         "@context": [
             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"
         ]
     }
+
+    if natural_disaster == 'Fire' and _valid_lonlat_point(ignition_points):
+        data["ignitionPoints"] = {
+            "type": "GeoProperty",
+            "value": {
+                "type": "Point",
+                "coordinates": ignition_points
+            }
+        }
+
+    initial_nd_metadata = global_cache.get('initial_nd_ogm_metadata')
+    if entity_ID == ND_entity_ID and initial_nd_metadata:
+        data["minio_url"] = {
+            "type": "Property",
+            "value": initial_nd_metadata["minio_url"]
+        }
+        data["filename"] = {
+            "type": "Property",
+            "value": initial_nd_metadata["file_name"]
+        }
+        data["bucket"] = {
+            "type": "Property",
+            "value": initial_nd_metadata["bucket"]
+        }
+        data["sent"] = {
+            "type": "Property",
+            "value": initial_nd_metadata["sent"]
+        }
 
     try:
         response_ = requests.post(url, json=data, headers=headers)
@@ -3910,6 +4092,7 @@ def update_entity(entity_id_, payload):
     response = None
     url_ = f'{config.BROKER_URL}/ngsi-ld/v1/entities/{entity_id_}/attrs'
     headers = {'Content-Type': 'application/ld+json'}
+    natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
     data_to_send = {
         "description": payload["description"],
         "creationDate": payload["creationDate"],
@@ -3927,18 +4110,21 @@ def update_entity(entity_id_, payload):
         "filename": payload["file_name"],
         "bucket": payload["bucket"],
         "sent": payload["sent"],
-        # "ignitionPoints": {
-        #     "type": "GeoProperty",
-        #     "value": {
-        #         "type": "Point",
-        #         "coordinates": payload["ignitionPoints"]
-        #     }
-        # },
         "location": {
             "type": "Polygon",
             "coordinates": payload["coordinates"]
         }
     }
+
+    ignition_points = payload.get("ignitionPoints")
+    if natural_disaster == 'Fire' and _valid_lonlat_point(ignition_points):
+        data_to_send["ignitionPoints"] = {
+            "type": "GeoProperty",
+            "value": {
+                "type": "Point",
+                "coordinates": ignition_points
+            }
+        }
     # Ensure @context is included in the payload
     payload_with_context = {
         "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
@@ -5240,4 +5426,3 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
             logger.error(f"Failed to publish payload for entity: {entity_id}")
     except Exception as e:
         logger.error(f"Error updating NGSI-LD entity: {e}")
-

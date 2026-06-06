@@ -55,6 +55,7 @@ ENV API_ENDPOINT=notify
 ENV OpenTopography_api_key=56da0f69ae202d4d9414278b0f6537bd
 ENV OGM_OBJ_RESOLUTION=5
 ENV OGM_ND_RESOLUTION=5
+ENV OGM_UPLOAD_INTERVAL_SEC=600
 ENV SCALING_FACTOR=1
 # Expose the necessary port
 EXPOSE 5505
@@ -67,4 +68,3 @@ ENV PATH /opt/conda/envs/geo_env/bin:$PATH
 
 # Run the Python application
 CMD ["python", "app.py"]
-

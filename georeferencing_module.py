@@ -11,22 +11,21 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from logging_config import logger
 
-path = None
-output_path = None
 
-def main(natural_disaster, flag, ground_resolution):
-    global path, output_path
+def main(natural_disaster, flag, ground_resolution, target_base_name=None):
     if natural_disaster == 'Flood':
-        path = './downloads/drone_imgs/Flood/'
+        base_path = './downloads/drone_imgs/Flood/'
     elif natural_disaster == 'Fire':
-        path = './downloads/drone_imgs/Fire/'
+        base_path = './downloads/drone_imgs/Fire/'
+    else:
+        raise ValueError(f"Unsupported natural disaster: {natural_disaster}")
     #################################
     if flag == 'segmented':
         output_path = './georeferenced_drone_images/segmented/'
     else:
         output_path = './georeferenced_drone_images/detection/'
 
-    DEM_path = f'{path}subset_dem.tif'
+    DEM_path = f'{base_path}subset_dem.tif'
 
     # Parameter selection
     downsampling = True
@@ -104,33 +103,37 @@ def main(natural_disaster, flag, ground_resolution):
         min_elevation = np.min(dem_elevation_data)
 
     file_name = 'none'
-    for file in sorted(os.listdir(path), reverse=False):
+    matched_any = False
+    for file in sorted(os.listdir(base_path), reverse=False):
         if flag == "segmented":
             if file.lower().endswith(('.jpg', '.jpeg', '.png')):
                 file_name = os.path.splitext(file)[0]
-                if file_name == 'none':
-                    logger.info('Error: No .JPG nor .png files found in the specified directory.')
-                    return
-                else:
-
-                    run_geo(output_path, path, flag, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
-                            max_elevation,
-                            min_elevation, dem_bounds,
-                            dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
-                            terrain_model, parallel_processing)
+                if target_base_name and file_name != target_base_name:
+                    continue
+                matched_any = True
+                run_geo(output_path, base_path, flag, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
+                        max_elevation,
+                        min_elevation, dem_bounds,
+                        dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
+                        terrain_model, parallel_processing, image_extension=os.path.splitext(file)[1].lower())
+                break
 
         elif flag == "bbox":
             if file.endswith('_obj.json'):
                 file_name = "_".join((file.split("_"))[:-1])
-                if file_name == 'none':
-                    logger.info('Error: No .JPG nor .png files found in the specified directory.')
-                    return
-                else:
-                    run_geo(output_path, path, flag, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
-                            max_elevation,
-                            min_elevation, dem_bounds,
-                            dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
-                            terrain_model, parallel_processing)
+                if target_base_name and file_name != target_base_name:
+                    continue
+                matched_any = True
+                run_geo(output_path, base_path, flag, file_name, Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data,
+                        max_elevation,
+                        min_elevation, dem_bounds,
+                        dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
+                        terrain_model, parallel_processing)
+                break
+
+    if not matched_any:
+        target_msg = f" for target '{target_base_name}'" if target_base_name else ""
+        logger.info(f"No matching input files found in {base_path} with flag '{flag}'{target_msg}.")
 
         #         break
         # if file_name == 'none':
@@ -146,12 +149,26 @@ def main(natural_disaster, flag, ground_resolution):
 def run_geo(output_path_, path_, flag, file_name,
             Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
             dem_res_meter,
-            downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing):
+            downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing,
+            image_extension='.png'):
     # Inputs
     image_path = path_ + file_name
 
-    segmented_image = f'{image_path}.png'
+    segmented_image = f'{image_path}{image_extension}'
     segmented_metadata_file = f'{image_path}_metadata.json'
+
+    def quarantine_failed_inputs(*failed_paths):
+        bad_dir = os.path.join(path_, "_bad")
+        os.makedirs(bad_dir, exist_ok=True)
+        for failed_path in failed_paths:
+            if not os.path.exists(failed_path):
+                continue
+            destination = os.path.join(bad_dir, os.path.basename(failed_path))
+            try:
+                os.replace(failed_path, destination)
+                logger.info(f"Moved failed georeferencing input to {destination}")
+            except Exception as move_error:
+                logger.error(f"Failed moving '{failed_path}' to '{destination}': {move_error}")
 
 #     print(12)
     start_pixel = (0, 0)
@@ -165,115 +182,36 @@ def run_geo(output_path_, path_, flag, file_name,
             logger.error(f"Metadata file not found: {segmented_metadata_file}")
             return
         ###############################################################
-        # Retrieve the camera state from image metadata
-        with open(segmented_metadata_file, 'r') as met_file:
-            original_metadata = json.load(met_file)
-        metadata = create_metadata(original_metadata)
-        camera_position = [value for key, value in metadata['drone_location'].items()]
-        camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
-        fov = metadata.get('camera_parameters').get('fov')
-        imag_width = metadata['camera_parameters']['width']
-        imag_height = metadata['camera_parameters']['height']
-        downsampling_factors = calculate_dnsmp_factors(camera_position[3], fov[1], fov[2], imag_width, imag_height,
-                                                       ground_resolution)
-        roll = camera_orientation[0]
-        with Image.open(segmented_image) as img:
-            image = np.array(img)
-            if len(image.shape) == 3:
-                image = np.mean(image, axis=2)
-            if downsampling:
-                image = downscale_local_mean(image, downsampling_factors)
-            img_height, img_width = image.shape
-
-        # Create an empty image for georeferencing four corners
-        image_emp = np.zeros((img_height, img_width))
-        # Put the values of four corners as 1 (which is != 0) to be georeferenced in the ray-tracing function
-        image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[
-            0, img_width - 1] = 255.0
-        end_pixel = (img_height - 1, img_width - 1)
-
-        camera_focal_length = compute_focal_length(image.shape, fov)  # In pixels
-
-        # The corners of the empty image should be georeferenced to be used in the GEOTIFF creation
-        crn_dic = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width), camera_position,
-                              camera_orientation,
-                              Rot_b_c_fixed,
-                              Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
-                              min_elevation,
-                              dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
-
-        if parallel_processing:
-            georef_dic_seg = parallel_ray_tracing(terrain_model, flag, image, image.shape, camera_position,
-                                                  camera_orientation,
-                                                  Rot_b_c_fixed, Rot_w_b_fixed, roll, camera_focal_length,
-                                                  dem_elevation_data,
-                                                  max_elevation, min_elevation, dem_bounds, dem_res_geo, dem_res_meter,
-                                                  start_pixel, end_pixel)
-        else:
-            georef_dic_seg = ray_tracing(terrain_model, flag, image, image.shape, camera_position,
-                                         camera_orientation,
-                                         Rot_b_c_fixed,
-                                         Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
-                                         min_elevation,
-                                         dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
-
-        create_geotif(output_path_, file_name, '_Segment', image, crn_dic, georef_dic_seg, camera_orientation,
-                      coordinate_systeme)
-
-        # Clean up an old temporary files
-        os.remove(segmented_image)
-        os.remove(segmented_metadata_file)
-
-    # Georeferencing the objects of the image
-    if flag == 'bbox':
-        bounding_boxes_file = f'{image_path}_obj.json'
-        if os.path.exists(bounding_boxes_file):
+        try:
             # Retrieve the camera state from image metadata
-            object_metadata_file = f'{image_path}_objects_metadata.json'
-            with open(object_metadata_file, 'r') as met_file:
+            with open(segmented_metadata_file, 'r') as met_file:
                 original_metadata = json.load(met_file)
             metadata = create_metadata(original_metadata)
+            logger.info(f"Georeferencing segmented file '{file_name}' using source '{os.path.basename(segmented_image)}'")
             camera_position = [value for key, value in metadata['drone_location'].items()]
             camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
-            fov = metadata['camera_parameters']['fov']
+            fov = metadata.get('camera_parameters').get('fov')
             imag_width = metadata['camera_parameters']['width']
             imag_height = metadata['camera_parameters']['height']
             downsampling_factors = calculate_dnsmp_factors(camera_position[3], fov[1], fov[2], imag_width, imag_height,
                                                            ground_resolution)
-
-            img_height = imag_height // downsampling_factors[0]
-            img_width = imag_width // downsampling_factors[1]
-            camera_focal_length = compute_focal_length((img_height, img_width), fov)  # In pixels
-
             roll = camera_orientation[0]
+            with Image.open(segmented_image) as img:
+                image = np.array(img)
+                if len(image.shape) == 3:
+                    image = np.mean(image, axis=2)
+                if downsampling:
+                    image = downscale_local_mean(image, downsampling_factors)
+                img_height, img_width = image.shape
 
-            # Retreive bounding box JSON file information
-            with open(bounding_boxes_file, 'r') as file:
-                bounding_data = json.load(file)
-                bounding_boxes = []
-                scores = []
-                labels = []
-                if len(bounding_data) > 0:
-                    for _ in range(len(bounding_data['boxes'])):
-                        bounding_boxes.append(bounding_data['boxes'][_]['bbox'])
-                        scores.append(bounding_data['boxes'][_]['confidence'])
-                        labels.append(bounding_data['boxes'][_]['category_id'])
-
-                    if downsampling:
-                        down_bounding_box = []
-                        for bounding_box in bounding_boxes:
-                            down_bbx = [bounding_box[0] // downsampling_factors[1],
-                                        bounding_box[1] // downsampling_factors[0],
-                                        bounding_box[2] // downsampling_factors[1],
-                                        bounding_box[3] // downsampling_factors[0]]
-                            down_bounding_box.append(down_bbx)
-                        bounding_boxes = down_bounding_box
+            # Create an empty image for georeferencing four corners
             image_emp = np.zeros((img_height, img_width))
             # Put the values of four corners as 1 (which is != 0) to be georeferenced in the ray-tracing function
             image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[
                 0, img_width - 1] = 255.0
-
             end_pixel = (img_height - 1, img_width - 1)
+
+            camera_focal_length = compute_focal_length(image.shape, fov)  # In pixels
 
             # The corners of the empty image should be georeferenced to be used in the GEOTIFF creation
             crn_dic = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width), camera_position,
@@ -282,33 +220,124 @@ def run_geo(output_path_, path_, flag, file_name,
                                   Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
                                   min_elevation,
                                   dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
-            image_emp = np.zeros((img_height, img_width))
-            boxes_georeferencing = []
-            for _ in range(len(bounding_boxes)):
-                # Find the center of mass pixel
-                cm_pixel = (min(int(bounding_boxes[_][3]), img_height - 1),
-                            min(int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2), img_width - 1))
-                image_emp[cm_pixel[0], cm_pixel[1]] = 1
 
-                georef_dic_obj = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width),
-                                             camera_position,
-                                             camera_orientation, Rot_b_c_fixed,
-                                             Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data,
-                                             max_elevation,
-                                             min_elevation, dem_bounds, dem_res_geo, dem_res_meter, cm_pixel, cm_pixel)
+            if parallel_processing:
+                georef_dic_seg = parallel_ray_tracing(terrain_model, flag, image, image.shape, camera_position,
+                                                      camera_orientation,
+                                                      Rot_b_c_fixed, Rot_w_b_fixed, roll, camera_focal_length,
+                                                      dem_elevation_data,
+                                                      max_elevation, min_elevation, dem_bounds, dem_res_geo, dem_res_meter,
+                                                      start_pixel, end_pixel)
+            else:
+                georef_dic_seg = ray_tracing(terrain_model, flag, image, image.shape, camera_position,
+                                             camera_orientation,
+                                             Rot_b_c_fixed,
+                                             Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
+                                             min_elevation,
+                                             dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
 
-                image_emp[cm_pixel] = scores[_]
-                georef_dic_obj['score'] = scores[_]
-                georef_dic_obj['label'] = labels[_]
-                boxes_georeferencing.append(georef_dic_obj)
-
-            create_geotif(output_path_, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
-                          camera_orientation,
+            create_geotif(output_path_, file_name, '_Segment', image, crn_dic, georef_dic_seg, camera_orientation,
                           coordinate_systeme)
 
             # Clean up an old temporary files
-            os.remove(bounding_boxes_file)
-            os.remove(object_metadata_file)
+            os.remove(segmented_image)
+            os.remove(segmented_metadata_file)
+        except Exception as e:
+            logger.error(f"Georeferencing failed for segmented input '{file_name}': {e}", exc_info=True)
+            quarantine_failed_inputs(segmented_image, segmented_metadata_file)
+            return
+
+    # Georeferencing the objects of the image
+    if flag == 'bbox':
+        bounding_boxes_file = f'{image_path}_obj.json'
+        if os.path.exists(bounding_boxes_file):
+            object_metadata_file = f'{image_path}_objects_metadata.json'
+            try:
+                # Retrieve the camera state from image metadata
+                with open(object_metadata_file, 'r') as met_file:
+                    original_metadata = json.load(met_file)
+                metadata = create_metadata(original_metadata)
+                logger.info(f"Georeferencing detection file '{file_name}'")
+                camera_position = [value for key, value in metadata['drone_location'].items()]
+                camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
+                fov = metadata['camera_parameters']['fov']
+                imag_width = metadata['camera_parameters']['width']
+                imag_height = metadata['camera_parameters']['height']
+                downsampling_factors = calculate_dnsmp_factors(camera_position[3], fov[1], fov[2], imag_width, imag_height,
+                                                               ground_resolution)
+
+                img_height = imag_height // downsampling_factors[0]
+                img_width = imag_width // downsampling_factors[1]
+                camera_focal_length = compute_focal_length((img_height, img_width), fov)  # In pixels
+
+                roll = camera_orientation[0]
+
+                # Retreive bounding box JSON file information
+                with open(bounding_boxes_file, 'r') as file:
+                    bounding_data = json.load(file)
+                    bounding_boxes = []
+                    scores = []
+                    labels = []
+                    if len(bounding_data) > 0:
+                        for _ in range(len(bounding_data['boxes'])):
+                            bounding_boxes.append(bounding_data['boxes'][_]['bbox'])
+                            scores.append(bounding_data['boxes'][_]['confidence'])
+                            labels.append(bounding_data['boxes'][_]['category_id'])
+
+                        if downsampling:
+                            down_bounding_box = []
+                            for bounding_box in bounding_boxes:
+                                down_bbx = [bounding_box[0] // downsampling_factors[1],
+                                            bounding_box[1] // downsampling_factors[0],
+                                            bounding_box[2] // downsampling_factors[1],
+                                            bounding_box[3] // downsampling_factors[0]]
+                                down_bounding_box.append(down_bbx)
+                            bounding_boxes = down_bounding_box
+                image_emp = np.zeros((img_height, img_width))
+                # Put the values of four corners as 1 (which is != 0) to be georeferenced in the ray-tracing function
+                image_emp[0, 0] = image_emp[img_height - 1, img_width - 1] = image_emp[img_height - 1, 0] = image_emp[
+                    0, img_width - 1] = 255.0
+
+                end_pixel = (img_height - 1, img_width - 1)
+
+                # The corners of the empty image should be georeferenced to be used in the GEOTIFF creation
+                crn_dic = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width), camera_position,
+                                      camera_orientation,
+                                      Rot_b_c_fixed,
+                                      Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data, max_elevation,
+                                      min_elevation,
+                                      dem_bounds, dem_res_geo, dem_res_meter, start_pixel, end_pixel)
+                image_emp = np.zeros((img_height, img_width))
+                boxes_georeferencing = []
+                for _ in range(len(bounding_boxes)):
+                    # Find the center of mass pixel
+                    cm_pixel = (min(int(bounding_boxes[_][3]), img_height - 1),
+                                min(int((bounding_boxes[_][0] + bounding_boxes[_][2]) / 2), img_width - 1))
+                    image_emp[cm_pixel[0], cm_pixel[1]] = 1
+
+                    georef_dic_obj = ray_tracing(terrain_model, flag, image_emp, (img_height, img_width),
+                                                 camera_position,
+                                                 camera_orientation, Rot_b_c_fixed,
+                                                 Rot_w_b_fixed, roll, camera_focal_length, dem_elevation_data,
+                                                 max_elevation,
+                                                 min_elevation, dem_bounds, dem_res_geo, dem_res_meter, cm_pixel, cm_pixel)
+
+                    image_emp[cm_pixel] = scores[_]
+                    georef_dic_obj['score'] = scores[_]
+                    georef_dic_obj['label'] = labels[_]
+                    boxes_georeferencing.append(georef_dic_obj)
+
+                create_geotif(output_path_, file_name, '_Objects', image_emp, crn_dic, boxes_georeferencing,
+                              camera_orientation,
+                              coordinate_systeme)
+
+                # Clean up an old temporary files
+                os.remove(bounding_boxes_file)
+                os.remove(object_metadata_file)
+            except Exception as e:
+                logger.error(f"Georeferencing failed for detection input '{file_name}': {e}", exc_info=True)
+                quarantine_failed_inputs(bounding_boxes_file, object_metadata_file)
+                return
 
 
 def create_metadata(json_data):
@@ -334,7 +363,7 @@ def create_metadata(json_data):
     modality = json_data.get('Modality')
 
     dfov, hfov, vfov = None, None, None
-    if model == 'ZH20T' or model == 'M3E' or model == 'FC2403'  or model == 'ZenmuseP1':
+    if model == 'ZH20T' or model == 'M3E' or model == 'M3M' or model == 'FC2403'  or model == 'ZenmuseP1':
         if modality=='IR':
             dfov = 63.8
             hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
@@ -634,11 +663,14 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
     elif subject == '_Objects':
         pass
     #############################################################
+    os.makedirs(output, exist_ok=True)
 
     # Create a new GeoTIFF file
     driver = gdal.GetDriverByName('GTiff')
     dataset = driver.Create(output + file_name + subject + '.tif', img_width, img_height, 1,
                             gdal.GDT_UInt16, options=['COMPRESS=LZW', 'TILED=YES'])
+    if dataset is None:
+        raise RuntimeError(f"Failed to create GeoTIFF at {output + file_name + subject + '.tif'}")
 
     # Write the numpy image data to the GeoTIFF file band by band
     dataset.GetRasterBand(1).WriteArray(image)
@@ -688,4 +720,7 @@ def create_geotif(output, file_name, subject, image, crn_dic, georef_data, camer
     return image, geotransform, srs.ExportToWkt()
 
 # if __name__ == "__main__":
-#    main('Flood', "bbox", 1.00)
+#    main('Fire', "segmented", 1.00)
+
+# if __name__ == "__main__":
+#       main('Fire', "segmented", 1.00, target_base_name="Fire_DJI_20260305102844_0089_V-a")
