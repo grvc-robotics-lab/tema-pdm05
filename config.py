@@ -16,7 +16,7 @@ if not MINIO_ENDPOINT:
 
 MINIO_ACCESS_KEY = os.getenv('MINIO_ACCESS_KEY')
 MINIO_SECRET_KEY = os.getenv('MINIO_SECRET_KEY')
-BUCKET_NAME = os.getenv("BUCKET_NAME")
+BUCKET_NAME = os.getenv("BUCKET_NAME", "use")
 
 # Additional Configurations
 PUBLIC_IP_ADDRESS = os.getenv("PUBLIC_IP_ADDRESS")  # Public IP or domain
@@ -53,11 +53,13 @@ ENTITY_Maps4Object_ID = os.getenv("BROKER_ENTITY_Maps4Object_ID")
 OpenTopography_api_key = os.getenv("OpenTopography_api_key", '56da0f69ae202d4d9414278b0f6537bd')
 OGM_ND_RESOLUTION = os.getenv("OGM_ND_RESOLUTION", 5)
 OGM_OBJ_RESOLUTION = os.getenv("OGM_OBJ_RESOLUTION", 5)
+OGM_UPLOAD_INTERVAL_SEC = float(os.getenv("OGM_UPLOAD_INTERVAL_SEC", 10 * 60.0))
 SCALING_FACTOR = os.getenv("SCALING_FACTOR", 1)
 TRACK_CONFIRM_UPDATES = os.getenv("TRACK_CONFIRM_UPDATES", 1)
+USE_TAKEOFF_ALTITUDE_FOR_GEOREF = os.getenv("USE_TAKEOFF_ALTITUDE_FOR_GEOREF", "True").lower() == "true"
+TAKEOFF_GROUND_ALTITUDE_M = float(os.getenv("TAKEOFF_GROUND_ALTITUDE_M", 150.3))
 
 if not OpenTopography_api_key:
     logger.error("No OpenTopography_api_key")
 
 logger.debug("All configurations loaded successfully.")
-

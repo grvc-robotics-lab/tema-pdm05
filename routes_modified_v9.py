@@ -28,6 +28,7 @@ from rasterio.transform import from_bounds, rowcol
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from requests.auth import HTTPBasicAuth
+from scipy.ndimage import gaussian_filter
 from scipy.optimize import linear_sum_assignment
 from flask import Flask, request, jsonify, Response, current_app, abort
 from flask_socketio import SocketIO
@@ -395,7 +396,8 @@ def handle_person_vehicle_detection(notification, parameters):
         json.dump(detection, json_file, indent=4)
 
     try:
-        main(disaster_info, "bbox", ground_resolution=1.00)
+        main(disaster_info, "bbox", ground_resolution=1.00,
+             target_base_name=f"{disaster_info}_{metadata_file_base}")
     except Exception as e:
         logger.error(f"Issue in geo-referencing due to {e}")
         return
@@ -447,7 +449,7 @@ def handle_segmentation(notification):
         downloaded_file_path = minio_client.download_file(bucket, mask_id, file_path)
         if downloaded_file_path:
             try:
-                main(disaster, "segmented", ground_resolution=1.00)
+                main(disaster, "segmented", ground_resolution=1.00, target_base_name=metadata_file_base)
             except Exception as e:
                 logger.error(f"Error in Geo referencing due to {e}", exc_info=True)
         else:
@@ -2283,11 +2285,8 @@ def estimate_nd_status():
         # ----------------------------------------------------------
         try:
             eps = 1e-6
-            count_thr = 10
-            ratio_thr = 0.1
-            social_weight = 0.20  # weak corroborative evidence
-            sigma_pixels = 2.0  # spatial uncertainty of hotspot location
-            radius_pixels = int(np.ceil(3.0 * sigma_pixels))
+            social_weight = float(getattr(config, "HOTSPOT_SOCIAL_WEIGHT", 0.15))
+            min_hotspot_score = float(getattr(config, "HOTSPOT_MIN_SCORE", 0.18))
 
             with rasterio.open(ogm_path) as src:
                 ogm_profile = src.profile
@@ -2295,6 +2294,7 @@ def estimate_nd_status():
                 transform = src.transform
                 H, W = ogm_data.shape
                 crs = src.crs
+                bounds = src.bounds
                 ogm_crs_str = crs.to_string()
 
             aoi_wgs = Polygon(global_cache.get('roi')[0])
@@ -2319,10 +2319,6 @@ def estimate_nd_status():
                 if f.startswith("hotspot_results") and f.endswith(".geojson")
             ]
             hotspot_files.sort()
-
-            # Precompute a Gaussian kernel in pixel space
-            yy, xx = np.mgrid[-radius_pixels:radius_pixels + 1, -radius_pixels:radius_pixels + 1]
-            gaussian_kernel = np.exp(-(xx ** 2 + yy ** 2) / (2.0 * sigma_pixels ** 2)).astype(np.float32)
 
             for hotspot_file in hotspot_files:
                 try:
@@ -2358,8 +2354,8 @@ def estimate_nd_status():
                         f"using latest date {latest_date!r} with {len(features)} features"
                     )
 
-                    hotspot_influence = np.zeros((H, W), dtype=np.float32)
-                    used_hotspots = 0
+                    hotspot_support = np.zeros((H, W), dtype=np.float32)
+                    used_hotspots = []
 
                     for feat in features:
                         props = feat.get("properties", {})
@@ -2374,94 +2370,42 @@ def estimate_nd_status():
                             logger.warning(f"Invalid polygon in {hotspot_file}")
                             continue
 
-                        c = float(props.get("count", 0) or 0)
-                        r = float(props.get("ratio", 0) or 0)
-                        if c < count_thr or r < ratio_thr:
-                            continue
-
-                        z_raw = props.get("z_score")
-                        p_raw = props.get("p_value")
-                        b_raw = props.get("bin", 0)
-                        count_related_raw = props.get("count_related")
-
-                        z_score = float(z_raw) if z_raw is not None else 0.0
-                        p_value = float(p_raw) if p_raw is not None else 1.0
-                        hotspot_bin = float(b_raw) if b_raw is not None else 0.0
-                        count_related = float(count_related_raw) if count_related_raw is not None else 0.0
-
-                        # Bounded hotspot confidence in [0, 1]
-                        count_score = min(c / 20.0, 1.0)
-                        ratio_score = np.clip(r, 0.0, 1.0)
-                        z_score_norm = min(max(z_score, 0.0) / 3.0, 1.0)
-                        p_score = 1.0 - np.clip(p_value, 0.0, 1.0)
-                        bin_score = min(max(hotspot_bin, 0.0) / 3.0, 1.0)
-                        related_score = np.clip(count_related / max(c, 1.0), 0.0, 1.0)
-
-                        hotspot_score = (
-                                0.15 * count_score +
-                                0.25 * ratio_score +
-                                0.20 * z_score_norm +
-                                0.15 * p_score +
-                                0.15 * bin_score +
-                                0.10 * related_score
-                        )
-                        hotspot_score = float(np.clip(hotspot_score, 0.0, 1.0))
-                        if hotspot_score <= 0.0:
+                        hotspot_score = compute_hotspot_score(props)
+                        if hotspot_score < min_hotspot_score:
                             continue
 
                         if tr_h:
                             poly = shapely_transform(tr_h.transform, poly)
 
-                        centroid = poly.centroid
-                        if centroid.is_empty:
-                            continue
-
-                        cx, cy = centroid.x, centroid.y
-
-                        try:
-                            row_c, col_c = rowcol(transform, cx, cy)
-                        except Exception:
-                            continue
-
-                        if row_c < 0 or row_c >= H or col_c < 0 or col_c >= W:
-                            continue
-
-                        r0 = max(0, row_c - radius_pixels)
-                        r1 = min(H, row_c + radius_pixels + 1)
-                        c0 = max(0, col_c - radius_pixels)
-                        c1 = min(W, col_c + radius_pixels + 1)
-
-                        kr0 = radius_pixels - (row_c - r0)
-                        kr1 = radius_pixels + (r1 - row_c)
-                        kc0 = radius_pixels - (col_c - c0)
-                        kc1 = radius_pixels + (c1 - col_c)
-
-                        patch = hotspot_score * gaussian_kernel[kr0:kr1, kc0:kc1]
-
-                        # Use max so overlapping hotspots strengthen locally without exploding
-                        # hotspot_influence[r0:r1, c0:c1] = np.maximum(
-                        #     hotspot_influence[r0:r1, c0:c1],
-                        #     patch
-                        # )
-                        hotspot_influence[r0:r1, c0:c1] = np.clip(
-                            hotspot_influence[r0:r1, c0:c1] + patch,
-                            0.0,
-                            1.0
+                        poly_mask = rasterize(
+                            [(mapping(poly), hotspot_score)],
+                            out_shape=(H, W),
+                            transform=transform,
+                            fill=0.0,
+                            dtype="float32",
+                            all_touched=True
                         )
-                        used_hotspots += 1
+                        hotspot_support = np.maximum(hotspot_support, poly_mask)
+                        used_hotspots.append({
+                            "h3": props.get("h3"),
+                            "score": round(hotspot_score, 4)
+                        })
 
-                    if used_hotspots == 0:
+                    if not used_hotspots:
                         logger.info(
-                            f"No hotspot features passed thresholds in {os.path.basename(hotspot_file)} "
-                            f"(count_thr={count_thr}, ratio_thr={ratio_thr})"
+                            f"No hotspot features passed score threshold in "
+                            f"{os.path.basename(hotspot_file)} (min_hotspot_score={min_hotspot_score})"
                         )
                         os.remove(hotspot_file)
                         continue
 
+                    sigma_pixels = sigma_meters_to_pixels(transform, bounds)
+                    hotspot_influence = gaussian_filter(hotspot_support, sigma=sigma_pixels, mode="nearest")
+                    if hotspot_influence.max() > 0:
+                        hotspot_influence = hotspot_influence / hotspot_influence.max()
+
                     hotspot_influence = np.clip(hotspot_influence, 0.0, 1.0)
-                    # mask = (hotspot_influence > 0) & aoi_mask
-                    prior_support = ogm_data >= 0.05
-                    mask = (hotspot_influence > 0) & aoi_mask & prior_support
+                    mask = (hotspot_influence > 0) & aoi_mask
 
                     if mask.any():
                         p_prev = np.clip(ogm_data, 0.0, 1.0)
@@ -2472,7 +2416,7 @@ def estimate_nd_status():
                         ogm_data = np.clip(p_new, 0.0, 1.0)
                     else:
                         logger.info(
-                            f"No hotspot influence survived AOI/prior-support gating in {os.path.basename(hotspot_file)}"
+                            f"No hotspot influence intersected AOI in {os.path.basename(hotspot_file)}"
                         )
 
                     os.remove(hotspot_file)
@@ -2507,8 +2451,9 @@ def estimate_nd_status():
                         _last_upload = now_6
 
                     logger.info(
-                        f"Fused & removed {hotspot_file} using centroid-based hotspot influence "
-                        f"(used_hotspots={used_hotspots})"
+                        f"Fused & removed {hotspot_file} using polygon-support hotspot influence "
+                        f"(used_hotspots={len(used_hotspots)}, sigma_pixels={sigma_pixels:.2f}, "
+                        f"top_h3={[h['h3'] for h in used_hotspots[:5]]})"
                     )
 
                 except Exception as e:
@@ -2759,6 +2704,56 @@ def fuse_fire_probability(existing_prob, hotspot_value, weight=0.5):
 
     # Clamp the result to ensure valid probability
     return np.clip(updated_prob, 0, 1)
+
+
+def compute_hotspot_score(props):
+    """
+    Convert a HotspotResult cell's attributes into a bounded confidence score.
+
+    This is intentionally conservative: count/ratio drive the score, while the
+    significance-related terms only help when the anomaly direction is positive.
+    """
+    count = float(props.get("count", 0) or 0)
+    ratio = float(props.get("ratio", 0) or 0)
+    z_score = float(props.get("z_score", 0) or 0)
+    p_value = float(props.get("p_value", 1) or 1)
+    hotspot_bin = float(props.get("bin", 0) or 0)
+    count_related = float(props.get("count_related", 0) or 0)
+
+    count_score = min(count / 20.0, 1.0)
+    ratio_score = np.clip(ratio, 0.0, 1.0)
+    z_score_norm = np.clip(max(z_score, 0.0) / 3.0, 0.0, 1.0)
+    p_score = (1.0 - np.clip(p_value, 0.0, 1.0)) if z_score > 0 else 0.0
+    bin_score = np.clip(hotspot_bin / 3.0, 0.0, 1.0)
+    related_score = np.clip(count_related / max(count, 1.0), 0.0, 1.0) if count > 0 else 0.0
+
+    return float(np.clip(
+        0.30 * count_score +
+        0.25 * ratio_score +
+        0.20 * z_score_norm +
+        0.10 * p_score +
+        0.10 * bin_score +
+        0.05 * related_score,
+        0.0,
+        1.0
+    ))
+
+
+def sigma_meters_to_pixels(transform, bounds):
+    """
+    Convert a metric smoothing scale into raster pixels.
+
+    The OGM is usually EPSG:4326, so approximate metres-per-pixel from the
+    geotransform at the raster mid-latitude.
+    """
+    sigma_meters = float(getattr(config, "HOTSPOT_SMOOTH_SIGMA_METERS", 200.0))
+    mid_lat = (bounds.bottom + bounds.top) / 2.0
+    xres_deg = abs(transform.a)
+    yres_deg = abs(transform.e)
+    mx = xres_deg * 111320.0 * math.cos(math.radians(mid_lat))
+    my = yres_deg * 111320.0
+    meters_per_pixel = max((mx + my) / 2.0, 1e-3)
+    return sigma_meters / meters_per_pixel
 
 
 def haversine_distance(coord1, coord2):
@@ -3267,7 +3262,11 @@ def estimate_objects_status(predict_only: bool = False):
         so high-confidence detections exert a stronger pull than weak ones.
         Deletions and appends use track_id throughout — no index-shift risk.
 
-    Phase 2 – Finalise KF state
+    Phase 2 – Social media score/label fusion
+        Score and label are Bayesian-fused into matched tracks.
+        No KF position update (social positions are too coarse).
+
+    Phase 3 – Finalise KF state
         Write kf_x / kf_P / kf_t back for every existing track.
         Brand-new tracks (created in Phase 1) skip this — their KF state was
         set in _new_track_from_measurement().
@@ -3309,7 +3308,7 @@ def estimate_objects_status(predict_only: bool = False):
         return
 
     detection_dir    = "georeferenced_drone_images/detection"
-    # social_media_dir = "downloads/SocialMedia"
+    social_media_dir = "downloads/SocialMedia"
 
     now_iso = datetime.now().isoformat()
     now_t   = time.time()
@@ -3375,11 +3374,8 @@ def estimate_objects_status(predict_only: bool = False):
             return None
         if len(coords) == 2:
             return [float(coords[0]), float(coords[1]), 0.0]
-        return [
-            float(coords[0]),
-            float(coords[1]),
-            float(coords[2]) if coords[2] is not None else 0.0
-        ]
+        return [float(coords[0]), float(coords[1]),
+                float(coords[2]) if coords[2] is not None else 0.0]
 
     # -------------------------------------------------------------------------
     # Confidence-scaled measurement covariance  (Paper Eq. 8)
@@ -3394,28 +3390,28 @@ def estimate_objects_status(predict_only: bool = False):
     # -------------------------------------------------------------------------
     # Social media helpers
     # -------------------------------------------------------------------------
-    # def _sm_prob(props: dict) -> float:
-    #     if not isinstance(props, dict):
-    #         return 0.5
-    #     for key in ("emotion_label_probability", "prob"):
-    #         if key in props:
-    #             try:    return float(props[key])
-    #             except: pass
-    #     if "related" in props:
-    #         try:    return 0.75 if int(props["related"]) == 1 else 0.25
-    #         except: pass
-    #     return 0.5
-    #
-    # def _sm_label(props: dict) -> int:
-    #     if not isinstance(props, dict):
-    #         return -1
-    #     if "label" in props:
-    #         try:    return int(props["label"])
-    #         except: return -1
-    #     if "related" in props:
-    #         try:    return 1 if int(props["related"]) == 1 else -1
-    #         except: return -1
-    #     return -1
+    def _sm_prob(props: dict) -> float:
+        if not isinstance(props, dict):
+            return 0.5
+        for key in ("emotion_label_probability", "prob"):
+            if key in props:
+                try:    return float(props[key])
+                except: pass
+        if "related" in props:
+            try:    return 0.75 if int(props["related"]) == 1 else 0.25
+            except: pass
+        return 0.5
+
+    def _sm_label(props: dict) -> int:
+        if not isinstance(props, dict):
+            return -1
+        if "label" in props:
+            try:    return int(props["label"])
+            except: return -1
+        if "related" in props:
+            try:    return 1 if int(props["related"]) == 1 else -1
+            except: return -1
+        return -1
 
     # -------------------------------------------------------------------------
     # KF helpers
@@ -3480,24 +3476,13 @@ def estimate_objects_status(predict_only: bool = False):
         llz = _ensure_3d(meas_llz)
         if llz is None:
             return None
-
         xyz = _llz_to_local_m(llz)
         if xyz is None:
             return None
-
-        # try:    score = float(meas_props.get("score", 0.5)) if isinstance(meas_props, dict) else 0.5
-        # except: score = 0.5
-        # try:    label = int(meas_props.get("label", -1))    if isinstance(meas_props, dict) else -1
-        # except: label = -1
-        try:
-            score = float(meas_props.get("score", 0.5)) if isinstance(meas_props, dict) else 0.5
-        except Exception:
-            score = 0.5
-
-        try:
-            label = int(meas_props.get("label", -1)) if isinstance(meas_props, dict) else -1
-        except Exception:
-            label = -1
+        try:    score = float(meas_props.get("score", 0.5)) if isinstance(meas_props, dict) else 0.5
+        except: score = 0.5
+        try:    label = int(meas_props.get("label", -1))    if isinstance(meas_props, dict) else -1
+        except: label = -1
 
         # Initial position uncertainty is confidence-scaled (Paper Eq. 8):
         # a low-confidence first detection starts with larger position variance.
@@ -3522,7 +3507,8 @@ def estimate_objects_status(predict_only: bool = False):
                 "kf_refined": llz.copy(),
                 # Initial P: confidence-scaled position block + default velocity block
                 "kf_x": xyz + [0., 0., 0.],
-                "kf_P": np.diag([r_init] * 3 + [init_vel_sigma_m_s ** 2] * 3).reshape(-1).tolist(),
+                "kf_P": np.diag([r_init] * 3 +
+                                [init_vel_sigma_m_s ** 2] * 3).reshape(-1).tolist(),
                 "kf_t":      now_t,
                 "kf_origin": [lon0, lat0],
             }
@@ -3545,23 +3531,17 @@ def estimate_objects_status(predict_only: bool = False):
     # -------------------------------------------------------------------------
     has_drone  = (os.path.isdir(detection_dir) and
                   any(f.endswith("_Objects.tif") for f in os.listdir(detection_dir)))
+    has_social = (os.path.isdir(social_media_dir) and
+                  any(f.startswith("single_posts_results") and f.endswith(".geojson")
+                      for f in os.listdir(social_media_dir)))
 
-    # has_social = (os.path.isdir(social_media_dir) and
-    #               any(f.startswith("single_posts_results") and f.endswith(".geojson")
-    #                   for f in os.listdir(social_media_dir)))
-
-    # if not has_drone and not has_social and not predict_only:
-    #     logger.debug("Objects: no new evidence and not predict_only -> nothing to do.")
-    #     return
-
-    if not has_drone and not predict_only:
+    if not has_drone and not has_social and not predict_only:
         logger.debug("Objects: no new evidence and not predict_only -> nothing to do.")
         return
 
     bm_id         = global_cache.get("bm_id")
     obj_entity_ID = f"urn:ngsi-ld:USE:PDM-05:Maps4Object:{bm_id}" if bm_id else None
-    # did_update = drone_updated = social_updated = False
-    did_update = drone_updated = False
+    did_update = drone_updated = social_updated = False
 
     with get_objects_lock(disaster_type):
 
@@ -3616,8 +3596,7 @@ def estimate_objects_status(predict_only: bool = False):
         # =====================================================================
         # PREDICT-ONLY PATH
         # =====================================================================
-        # if predict_only and not has_drone and not has_social:
-        if predict_only and not has_drone:
+        if predict_only and not has_drone and not has_social:
             if not global_cache.get("objects_tracking_started", False):
                 logger.debug("Objects: predict_only ignored (tracking not started).")
                 return
@@ -3817,7 +3796,6 @@ def estimate_objects_status(predict_only: bool = False):
 
         # =====================================================================
         # PHASE 2 — SOCIAL MEDIA: score/label fusion only (no KF position update)
-        # Now, not using the social media for tracking the person
         # =====================================================================
         # if not predict_only and has_social:
         #     sm_files = sorted(
@@ -3902,13 +3880,13 @@ def estimate_objects_status(predict_only: bool = False):
         #
         #         social_updated = did_update = True
         #         global_cache.set("objects_tracking_started", True)
-        #
+
         if not did_update:
             logger.debug("Objects: no updates applied; skipping write/upload.")
             return
 
         # =====================================================================
-        # PHASE 2 — FINALISE KF STATE FOR ALL EXISTING TRACKS
+        # PHASE 3 — FINALISE KF STATE FOR ALL EXISTING TRACKS
         # Look up by track_id; brand-new tracks (not in predicted_kfs) skip.
         # =====================================================================
         for feat in ogm_features:
@@ -3961,7 +3939,7 @@ def estimate_objects_status(predict_only: bool = False):
         filtered_metadata["features"] = [
             ff for ff in filtered_metadata.get("features", [])
             if (ff.get("properties", {}).get("label", -1) != -1)
-            # or (ff.get("properties", {}).get("source") == "social")
+            or (ff.get("properties", {}).get("source") == "social")
         ]
 
         try:
@@ -3973,8 +3951,7 @@ def estimate_objects_status(predict_only: bool = False):
 
         logger.info(
             f"Objects: snapshot features={len(filtered_metadata.get('features', []))} "
-            f"(drone={drone_updated}, predict_only={predict_only})"
-            # f"(drone={drone_updated}, social={social_updated}, predict_only={predict_only})"
+            f"(drone={drone_updated}, social={social_updated}, predict_only={predict_only})"
         )
 
         metadata = {

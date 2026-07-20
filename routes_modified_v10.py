@@ -88,6 +88,8 @@ class GlobalCache:
         self.ogm_flag = False
         self.ogm_counter = 0
         self.initial_nd_ogm_metadata = None
+        self.uav_common_base = None
+        self.takeoff_ground_altitude_m = None
 
         self.objects_tracking_started = False
     def get(self, key, default=None):
@@ -133,6 +135,11 @@ _last_upload = time.monotonic() - UPLOAD_INTERVAL
 _upload_lock = threading.Lock()
 # --------------------------------------------------------
 MAX_WORKERS = min(8, (os.cpu_count() or 4) * 2)
+
+
+# --------------------------------------------------------
+def utc_now_iso_z():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # --------------------------------------------------------
@@ -398,7 +405,8 @@ def handle_person_vehicle_detection(notification, parameters):
 
     try:
         main(disaster_info, "bbox", ground_resolution=1.00,
-             target_base_name=f"{disaster_info}_{metadata_file_base}")
+             target_base_name=f"{disaster_info}_{metadata_file_base}",
+             takeoff_ground_altitude_m=global_cache.get('takeoff_ground_altitude_m'))
     except Exception as e:
         logger.error(f"Issue in geo-referencing due to {e}")
         return
@@ -450,7 +458,9 @@ def handle_segmentation(notification):
         downloaded_file_path = minio_client.download_file(bucket, mask_id, file_path)
         if downloaded_file_path:
             try:
-                main(disaster, "segmented", ground_resolution=1.00, target_base_name=metadata_file_base)
+                main(disaster, "segmented", ground_resolution=1.00,
+                     target_base_name=metadata_file_base,
+                     takeoff_ground_altitude_m=global_cache.get('takeoff_ground_altitude_m'))
             except Exception as e:
                 logger.error(f"Error in Geo referencing due to {e}", exc_info=True)
         else:
@@ -467,6 +477,7 @@ def process_alert(notification, entity_id):
     ignitionPoints = notification.get("ignitionPoints", {}).get("value", {})
     alert_timestamp = notification.get("sent", {}).get("value")
     bm_id = notification.get("bm_id", {}).get("value", None)
+    uav_info = notification.get("uav", {}).get("value", {})
 
     updates = {}
 
@@ -501,7 +512,60 @@ def process_alert(notification, entity_id):
     else:
         updates['bm_id'] = "Unknown event"
 
+    common_base = uav_info.get("common_base", {}) if isinstance(uav_info, dict) else {}
+    common_base_coords = common_base.get("coordinates") if isinstance(common_base, dict) else None
+    if (
+            isinstance(common_base_coords, (list, tuple))
+            and len(common_base_coords) >= 2
+            and common_base_coords[0] is not None
+            and common_base_coords[1] is not None
+    ):
+        try:
+            updates['uav_common_base'] = [float(common_base_coords[0]), float(common_base_coords[1])]
+            updates['takeoff_ground_altitude_m'] = None
+        except (TypeError, ValueError):
+            updates['uav_common_base'] = None
+            updates['takeoff_ground_altitude_m'] = None
+            logger.warning(f"Invalid uav.common_base coordinates for entity ID {entity_id}: {common_base_coords}")
+    else:
+        updates['uav_common_base'] = None
+        updates['takeoff_ground_altitude_m'] = None
+
     global_cache.update(**updates)
+
+
+def sample_takeoff_ground_altitude_from_dem(dem_path, common_base):
+    if not dem_path or not common_base:
+        return None
+
+    try:
+        lon, lat = float(common_base[0]), float(common_base[1])
+        with rasterio.open(dem_path) as dem_src:
+            if not (dem_src.bounds.left <= lon <= dem_src.bounds.right
+                    and dem_src.bounds.bottom <= lat <= dem_src.bounds.top):
+                logger.warning(
+                    f"UAV common_base ({lon}, {lat}) is outside DEM bounds {dem_src.bounds}; "
+                    "using configured takeoff altitude fallback."
+                )
+                return None
+
+            sample = next(dem_src.sample([(lon, lat)]), None)
+            if sample is None or sample.size == 0:
+                return None
+
+            elevation = float(sample[0])
+            nodata = dem_src.nodata
+            if not np.isfinite(elevation) or (nodata is not None and np.isclose(elevation, nodata)):
+                logger.warning(
+                    f"Invalid DEM elevation at UAV common_base ({lon}, {lat}): {elevation}; "
+                    "using configured takeoff altitude fallback."
+                )
+                return None
+
+            return elevation
+    except Exception as e:
+        logger.warning(f"Could not sample takeoff ground altitude from DEM: {e}")
+        return None
 
 def fetch_burnt_area(notification, polygon):
     """
@@ -1108,6 +1172,7 @@ def initialize_processing():
                             ogm_flag=False,
                             ogm_counter=0,
                             initial_nd_ogm_metadata=None,
+                            takeoff_ground_altitude_m=None,
                             kf_states={},
                             objects_tracking_started=False
                         )
@@ -1175,6 +1240,12 @@ def initialize_processing():
                                             coordinates=polygon_coordinates,
                                             dem_dataset="COP30" #"SRTMGL1"
                                         )
+                                        takeoff_altitude = sample_takeoff_ground_altitude_from_dem(
+                                            output_dem_file,
+                                            global_cache.get('uav_common_base')
+                                        )
+                                        if takeoff_altitude is not None:
+                                            global_cache.set('takeoff_ground_altitude_m', takeoff_altitude)
                                     except Exception as e:
                                         logger.warning(f"DEM download failed: {e}")
                                         output_dem_file = None
@@ -2134,50 +2205,46 @@ def estimate_nd_status():
                                                        config.BUCKET_NAME, metadata_timestamp)
                     except Exception as e:
                         logger.error(f"Error saving or uploading OGM: {e}")
+                elif data_type == 'burnt_area':
+                    ogm_data = update_occupancy_grid_fire_sat_fixed(
+                        ogm_data,
+                        ogm_gt_,
+                        observ_sat_data_,
+                        observ_sat_gt_,
+                        'burnt_area',
+                        ogm_crs='EPSG:4326',
+                        observation_crs=observ_sat_proj,
+                        obs_nodata=observ_nodata)
                     # ----------------------------------------------------------
-                """
-                commented for SAR trial
-                """
-                # elif data_type == 'burnt_area':
-                #     ogm_data = update_occupancy_grid_fire_sat_fixed(
-                #         ogm_data,
-                #         ogm_gt_,
-                #         observ_sat_data_,
-                #         observ_sat_gt_,
-                #         'burnt_area',
-                #         ogm_crs='EPSG:4326',
-                #         observation_crs=observ_sat_proj,
-                #         obs_nodata=observ_nodata)
-                #     # ----------------------------------------------------------
-                #     # Save updated OGM as GeoTIFF
-                #     # ----------------------------------------------------------
-                #     try:
-                #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                #         output_tiff_path_timestamp = f"occupancy_grid_map_{disaster_type}_{timestamp}.tif"
-                #
-                #         output_tiff_path = f"occupancy_grid_map_{disaster_type}.tif"
-                #         save_geotiff("estimated_OGM",
-                #                      output_tiff_path,
-                #                      ogm_data,
-                #                      ogm_gt_,
-                #                      timestamp,
-                #                      crs_epsg=4326)
-                #
-                #         metadata_timestamp = save_geotiff("estimated_OGM",
-                #                                           output_tiff_path_timestamp,
-                #                                           ogm_data,
-                #                                           ogm_gt_,
-                #                                           timestamp,
-                #                                           crs_epsg=4326)
-                #         if metadata_timestamp.get('coordinates') == global_cache.get('roi'):
-                #             if should_upload_now():
-                #                 process_and_upload_ogm(ND_entity_ID,
-                #                                        os.path.join("estimated_OGM", output_tiff_path_timestamp),
-                #                                        config.BUCKET_NAME, metadata_timestamp)
-                #     except Exception as e:
-                #         logger.error(f"Error saving or uploading OGM: {e}")
-                #     # ----------------------------------------------------------
-                # logger.info(f"OGM has successfully generated and fused sate file")
+                    # Save updated OGM as GeoTIFF
+                    # ----------------------------------------------------------
+                    try:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_tiff_path_timestamp = f"occupancy_grid_map_{disaster_type}_{timestamp}.tif"
+
+                        output_tiff_path = f"occupancy_grid_map_{disaster_type}.tif"
+                        save_geotiff("estimated_OGM",
+                                     output_tiff_path,
+                                     ogm_data,
+                                     ogm_gt_,
+                                     timestamp,
+                                     crs_epsg=4326)
+
+                        metadata_timestamp = save_geotiff("estimated_OGM",
+                                                          output_tiff_path_timestamp,
+                                                          ogm_data,
+                                                          ogm_gt_,
+                                                          timestamp,
+                                                          crs_epsg=4326)
+                        if metadata_timestamp.get('coordinates') == global_cache.get('roi'):
+                            if should_upload_now():
+                                process_and_upload_ogm(ND_entity_ID,
+                                                       os.path.join("estimated_OGM", output_tiff_path_timestamp),
+                                                       config.BUCKET_NAME, metadata_timestamp)
+                    except Exception as e:
+                        logger.error(f"Error saving or uploading OGM: {e}")
+                    # ----------------------------------------------------------
+                logger.info(f"OGM has successfully generated and fused sate file")
         except FileNotFoundError:
             logger.warning("Satellite ROI directory not found.")
         except Exception as e:
@@ -2768,7 +2835,7 @@ def estimate_objects_status(predict_only: bool = False):
         to the confidence-scaled measurement covariance (Paper Eq. 8):
             R_{t,j} = R_base / max(c^det_{t,j}, ε_c)
         so high-confidence detections exert a stronger pull than weak ones.
-        Deletions and appends use track_id throughout — no index-shift risk.
+        Deletions and appends use track_id throughout - no index-shift risk.
 
     Phase 2 – Social media score/label fusion
         Score and label are Bayesian-fused into matched tracks.
@@ -2776,7 +2843,7 @@ def estimate_objects_status(predict_only: bool = False):
 
     Phase 3 – Finalise KF state
         Write kf_x / kf_P / kf_t back for every existing track.
-        Brand-new tracks (created in Phase 1) skip this — their KF state was
+        Brand-new tracks (created in Phase 1) skip this - their KF state was
         set in _new_track_from_measurement().
 
     Predict-only path
@@ -2939,7 +3006,7 @@ def estimate_objects_status(predict_only: bool = False):
         return F, Q
 
     def _build_kf(x6, P6, dt):
-        """Build and return a KF with default (unscaled) R — caller overrides R before update."""
+        """Build and return a KF with default (unscaled) R - caller overrides R before update."""
         F, Q = _cv_F_Q(dt, accel_sigma_m_s2)
         kf   = KalmanFilter(state_dim=6, measurement_dim=3, F=F, H=np.eye(3, 6))
         kf.x = x6;  kf.P = P6;  kf.Q = Q
@@ -3067,7 +3134,7 @@ def estimate_objects_status(predict_only: bool = False):
         _ensure_lifecycle_fields(ogm_features)
 
         # =====================================================================
-        # PHASE 0 — PREDICT ALL EXISTING TRACKS
+        # PHASE 0 - PREDICT ALL EXISTING TRACKS
         # Keyed by track_id so deletions/appends in Phase 1 cannot corrupt cache.
         # Geometry is advanced to x̄_{t|t-1} so association uses predicted pos.
         # =====================================================================
@@ -3153,7 +3220,7 @@ def estimate_objects_status(predict_only: bool = False):
             # Fall through to snapshot/upload.
 
         # =====================================================================
-        # PHASE 1 — DRONE: ASSOCIATE against predicted positions → INLINE UPDATE
+        # PHASE 1 - DRONE: ASSOCIATE against predicted positions → INLINE UPDATE
         # kf.R is set per-detection using the confidence-scaled covariance.
         # =====================================================================
         if not predict_only and has_drone:
@@ -3303,7 +3370,7 @@ def estimate_objects_status(predict_only: bool = False):
                 logger.info("Objects: drone integration done")
 
         # =====================================================================
-        # PHASE 2 — SOCIAL MEDIA: score/label fusion only (no KF position update)
+        # PHASE 2 - SOCIAL MEDIA: score/label fusion only (no KF position update)
         # =====================================================================
         # if not predict_only and has_social:
         #     sm_files = sorted(
@@ -3394,7 +3461,7 @@ def estimate_objects_status(predict_only: bool = False):
             return
 
         # =====================================================================
-        # PHASE 3 — FINALISE KF STATE FOR ALL EXISTING TRACKS
+        # PHASE 3 - FINALISE KF STATE FOR ALL EXISTING TRACKS
         # Look up by track_id; brand-new tracks (not in predicted_kfs) skip.
         # =====================================================================
         for feat in ogm_features:
@@ -3467,7 +3534,7 @@ def estimate_objects_status(predict_only: bool = False):
             "author":           "GRVC lab, University of Seville",
             "description":      (f"Estimated occupancy grid map for the {disaster_type} scenario, "
                                  "used to track detected persons and vehicles."),
-            "creationDate":     datetime.now().isoformat(),
+            "creationDate":     utc_now_iso_z(),
             "spatialReference": "EPSG:4326",
             "file_name":        f"pdm05/{global_cache.get('bm_id')}/{snapshot_name}",
             "coordinates":      global_cache.get("roi", [None]),
@@ -4007,7 +4074,7 @@ def create_entity(entity_ID, entity_type_):
         },
         "creationDate": {
             "type": "Property",
-            "value": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.localtime())
+            "value": utc_now_iso_z()
         },
         "bandName": 'Occupancy',
         "software": {
@@ -4940,6 +5007,12 @@ def load_segment_georef_data(
                 if not np.isfinite(lon) or not np.isfinite(lat) or not np.isfinite(value):
                     continue
 
+                # Flood segmentation masks encode flood support in positive
+                # pixels. Zero/background pixels are not fused as no-flood
+                # evidence; untouched cells keep their prior probability.
+                if measurement_type == "Flood" and value <= 0.0:
+                    continue
+
                 samples.append({
                     "pixel_coords": [row, col],
                     "coords": [lon, lat, elev],
@@ -4967,6 +5040,59 @@ def load_segment_georef_data(
 
     return (None, None) if return_consumed else None
 
+
+def apply_aoi_mask_to_grid(data, GTransform, crs_epsg=4326, outside_value=0.0):
+    """
+    Keep only cells inside the alert AOI polygon and force the remaining cells
+    to a background value. This prevents Flood fusion updates from leaking into
+    the rectangular raster extent outside the AOI.
+    """
+    try:
+        roi = global_cache.get('roi')
+        if not roi:
+            return data
+
+        arr = np.array(data, copy=True)
+        if arr.ndim != 2:
+            return arr
+
+        height, width = arr.shape
+        transform = _gt_to_affine(GTransform)
+
+        # Alert AOIs may be stored either as the inner ring [[lon, lat], ...]
+        # or as GeoJSON Polygon coordinates [[[lon, lat], ...]].
+        roi_ring = roi[0] if isinstance(roi[0], (list, tuple)) and roi[0] and isinstance(roi[0][0], (list, tuple)) else roi
+        if not roi_ring or roi_ring == [None]:
+            return arr
+
+        aoi_geom = Polygon(roi_ring)
+        if not aoi_geom.is_valid:
+            aoi_geom = aoi_geom.buffer(0)
+        if aoi_geom.is_empty:
+            return arr
+
+        raster_crs = RioCRS.from_epsg(crs_epsg)
+        if raster_crs != RioCRS.from_epsg(4326):
+            to_raster = Transformer.from_crs("EPSG:4326", raster_crs, always_xy=True).transform
+            aoi_geom = shapely_transform(to_raster, aoi_geom)
+
+        aoi_mask = rasterize(
+            [(mapping(aoi_geom), 1)],
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype="uint8",
+            all_touched=False,
+        ).astype(bool)
+
+        arr[~aoi_mask] = outside_value
+        return arr
+
+    except Exception as e:
+        logger.warning(f"Failed to apply AOI mask to OGM grid: {e}", exc_info=True)
+        return data
+
+
 def save_geotiff(output_path_maps_, FileName, data, GTransform, timestamp, crs_epsg=4326):
     """
     Save data as a GeoTIFF file.
@@ -4985,6 +5111,9 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, timestamp, crs_e
     try:
         # Ensure data is a numpy array
         data = np.array(data)
+        natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
+        if natural_disaster == 'Flood':
+            data = apply_aoi_mask_to_grid(data, GTransform, crs_epsg=crs_epsg, outside_value=0.0)
         driver = gdal.GetDriverByName('GTiff')
         if not driver:
             logger.error('GTiff driver is not available.')
@@ -5021,14 +5150,15 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, timestamp, crs_e
         band_ = dataset_ogm.GetRasterBand(1)
         band_.WriteArray(data)
         band_.SetDescription('Estimated OGM')
+        if natural_disaster == 'Flood':
+            band_.SetNoDataValue(0.0)
 
-        natural_disaster = global_cache.get('natural_disaster', 'No disaster info')
         # Define metadata
         metadata = {
             'title': 'Probabilistic Occupancy Grid Mapping for Dynamic Environments of ND',
             'author': 'GRVC lab, University of Seville',
             'description': f"Probabilistic occupancy grid map for the {natural_disaster} scenario, enabling near real-time estimation and tracking of disaster propagation.",
-            'creationDate': datetime.now().isoformat(),  # Current date and time
+            'creationDate': utc_now_iso_z(),
             "XMin": GTransform[0],
             "XRes": GTransform[1],
             "YMax": GTransform[3],
@@ -5036,7 +5166,7 @@ def save_geotiff(output_path_maps_, FileName, data, GTransform, timestamp, crs_e
             "spatialReference": f"EPSG:{crs_epsg}",
             "file_name": f'pdm05/{global_cache.get("bm_id")}/{FileName}',
             "coordinates": global_cache.get('roi', [None]),
-            "bucket": "use",
+            "bucket": config.BUCKET_NAME,
             "bm_id": global_cache.get("bm_id"),
             "sent": timestamp,
             "ignitionPoints": global_cache.get('ignitionPoints', [None]),
@@ -5213,7 +5343,7 @@ def update_occupancy_grid_from_georef_segments(OGMData, OGM_gt_, samples, measur
         p_ba_min = 0.05
         likelihood = p_ba_max - (p_ba_max - p_ba_min) * obs
     elif measurement_type == "Flood":
-        pmin_uav = 0.05
+        pmin_uav = 0.50
         pmax_uav = 0.95
         likelihood = pmin_uav + (pmax_uav - pmin_uav) * obs
     else:
@@ -5288,18 +5418,20 @@ def update_occupancy_grid_flood_sat_fixed(
         # 3) Bayesian fusion on the aligned grid
         prior = np.clip(OGMData.astype(np.float32), 0.0, 1.0)
 
-        # Your likelihood mapping
-        """
-        likelihood = 0.5 + 0.5 * (obs_on_ogm - 0.1)
+        # Map positive satellite flood support to bounded likelihoods. Zero or
+        # background pixels are not treated as no-flood observations; untouched
+        # cells keep their prior probability.
+        sat_no_flood_likelihood = 0.50
+        sat_flood_likelihood = 0.85
+        obs_norm = np.clip(obs_on_ogm, 0.0, 1.0)
+        likelihood = sat_no_flood_likelihood + (
+            sat_flood_likelihood - sat_no_flood_likelihood
+        ) * obs_norm
         likelihood = np.clip(likelihood, epsilon, 1.0 - epsilon)
-        """
-        likelihood = np.clip(obs_on_ogm, epsilon, 1.0 - epsilon)
 
-        # Keep original gating behavior: update only where obs > 0 and finite
-        """
-        mask_valid = np.isfinite(obs_on_ogm) & (obs_on_ogm > 0)
-        """
-        mask_valid = np.isfinite(obs_on_ogm)
+        # Update only cells where the satellite product gives positive flood
+        # support. Cells outside the measurement support remain unchanged.
+        mask_valid = np.isfinite(obs_on_ogm) & (obs_norm > 0.0)
         if not np.any(mask_valid):
             logger.info("No valid observation pixels after re-projection; returning OGM unchanged.")
             return prior  # ensure dtype/clip
@@ -5417,6 +5549,7 @@ def process_and_upload_ogm(entity_id, file_path_, bucket_name, metadata):
         minio_client.upload_file(bucket_name, object_name, file_path_)
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
+        return
     try:
         response = update_entity(entity_id, metadata)
         if response:

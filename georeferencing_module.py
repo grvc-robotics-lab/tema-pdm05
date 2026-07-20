@@ -10,9 +10,10 @@ from pyproj import Transformer
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from logging_config import logger
+import config
 
 
-def main(natural_disaster, flag, ground_resolution, target_base_name=None):
+def main(natural_disaster, flag, ground_resolution, target_base_name=None, takeoff_ground_altitude_m=None):
     if natural_disaster == 'Flood':
         base_path = './downloads/drone_imgs/Flood/'
     elif natural_disaster == 'Fire':
@@ -115,7 +116,8 @@ def main(natural_disaster, flag, ground_resolution, target_base_name=None):
                         max_elevation,
                         min_elevation, dem_bounds,
                         dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
-                        terrain_model, parallel_processing, image_extension=os.path.splitext(file)[1].lower())
+                        terrain_model, parallel_processing, image_extension=os.path.splitext(file)[1].lower(),
+                        takeoff_ground_altitude_m=takeoff_ground_altitude_m)
                 break
 
         elif flag == "bbox":
@@ -128,7 +130,8 @@ def main(natural_disaster, flag, ground_resolution, target_base_name=None):
                         max_elevation,
                         min_elevation, dem_bounds,
                         dem_res_geo, dem_res_meter, downsampling, ground_resolution, coordinate_system,
-                        terrain_model, parallel_processing)
+                        terrain_model, parallel_processing,
+                        takeoff_ground_altitude_m=takeoff_ground_altitude_m)
                 break
 
     if not matched_any:
@@ -150,7 +153,7 @@ def run_geo(output_path_, path_, flag, file_name,
             Rot_b_c_fixed, Rot_w_b_fixed, dem_elevation_data, max_elevation, min_elevation, dem_bounds, dem_res_geo,
             dem_res_meter,
             downsampling, ground_resolution, coordinate_systeme, terrain_model, parallel_processing,
-            image_extension='.png'):
+            image_extension='.png', takeoff_ground_altitude_m=None):
     # Inputs
     image_path = path_ + file_name
 
@@ -186,7 +189,7 @@ def run_geo(output_path_, path_, flag, file_name,
             # Retrieve the camera state from image metadata
             with open(segmented_metadata_file, 'r') as met_file:
                 original_metadata = json.load(met_file)
-            metadata = create_metadata(original_metadata)
+            metadata = create_metadata(original_metadata, takeoff_ground_altitude_m=takeoff_ground_altitude_m)
             logger.info(f"Georeferencing segmented file '{file_name}' using source '{os.path.basename(segmented_image)}'")
             camera_position = [value for key, value in metadata['drone_location'].items()]
             camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
@@ -256,7 +259,7 @@ def run_geo(output_path_, path_, flag, file_name,
                 # Retrieve the camera state from image metadata
                 with open(object_metadata_file, 'r') as met_file:
                     original_metadata = json.load(met_file)
-                metadata = create_metadata(original_metadata)
+                metadata = create_metadata(original_metadata, takeoff_ground_altitude_m=takeoff_ground_altitude_m)
                 logger.info(f"Georeferencing detection file '{file_name}'")
                 camera_position = [value for key, value in metadata['drone_location'].items()]
                 camera_orientation = [value for key, value in metadata['gimbal_parameters'].items()]
@@ -340,7 +343,7 @@ def run_geo(output_path_, path_, flag, file_name,
                 return
 
 
-def create_metadata(json_data):
+def create_metadata(json_data, takeoff_ground_altitude_m=None):
     '''
     This function returns camera position, orientation, and field of view by reading
     the image metadata
@@ -352,8 +355,34 @@ def create_metadata(json_data):
     camera_lon = dms_to_decimal(lon_dms[0], lon_dms[2][:-1], lon_dms[3][:-2], lon_dms[4])
     lat_dms = json_data['GPSLatitude'].split()
     camera_lat = dms_to_decimal(lat_dms[0], lat_dms[2][:-1], lat_dms[3][:-2], lat_dms[4])
-    camera_alt = float(json_data['GPSAltitude'].split()[0])
     camera_alt_rel = float(json_data['RelativeAltitude'])
+    camera_alt_gps = float(json_data['GPSAltitude'].split()[0])
+    if config.USE_TAKEOFF_ALTITUDE_FOR_GEOREF:
+        altitude_source = (
+            "DEM/common_base"
+            if takeoff_ground_altitude_m is not None
+            else "config fallback"
+        )
+        takeoff_altitude = (
+            float(takeoff_ground_altitude_m)
+            if takeoff_ground_altitude_m is not None
+            else config.TAKEOFF_GROUND_ALTITUDE_M
+        )
+        camera_alt = takeoff_altitude + camera_alt_rel
+        logger.info(
+            f"Georeferencing altitude: source={altitude_source}, "
+            f"takeoff_ground_altitude_m={takeoff_altitude:.3f}, "
+            f"relative_altitude_m={camera_alt_rel:.3f}, "
+            f"camera_altitude_m={camera_alt:.3f}"
+        )
+    else:
+        camera_alt = camera_alt_gps
+        logger.info(
+            f"Georeferencing altitude: source=metadata GPSAltitude, "
+            # f"gps_altitude_m={camera_alt_gps:.3f}, "
+            # f"relative_altitude_m={camera_alt_rel:.3f}, "
+            # f"camera_altitude_m={camera_alt:.3f}"
+        )
     gimbal_roll = radians(float(json_data['GimbalRollDegree']))
     gimbal_pitch = radians(float(json_data['GimbalPitchDegree']))
     gimbal_yaw = radians(float(json_data['GimbalYawDegree']))
@@ -363,7 +392,7 @@ def create_metadata(json_data):
     modality = json_data.get('Modality')
 
     dfov, hfov, vfov = None, None, None
-    if model == 'ZH20T' or model == 'M3E' or model == 'M3M' or model == 'FC2403'  or model == 'ZenmuseP1':
+    if model in ('ZH20T', 'M3E', 'M3M', 'M3T', 'FC2403', 'ZenmuseP1'):
         if modality=='IR':
             dfov = 63.8
             hfov, vfov = calculate_hv_fov(dfov, img_width, img_height)
