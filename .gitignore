@@ -36,9 +36,34 @@ env_vars.txt
 downloads/
 estimated_OGM/
 
-# Geospatial sidecars
-*.aux.xml
-*.tif.aux.xml
+# Keep common case-study/data artifact formats trackable, even under ignored
+# output folders. Other generated files in those folders remain ignored.
+!downloads/
+!downloads/**/
+!downloads/**/*.tif
+!downloads/**/*.tiff
+!downloads/**/*.geotif
+!downloads/**/*.geotiff
+!downloads/**/*.json
+!downloads/**/*.geojson
+!downloads/**/*.png
+!downloads/**/*.jpg
+!downloads/**/*.jpeg
+!downloads/**/*.csv
+!downloads/**/*.xml
+!estimated_OGM/
+!estimated_OGM/**/
+!estimated_OGM/**/*.tif
+!estimated_OGM/**/*.tiff
+!estimated_OGM/**/*.geotif
+!estimated_OGM/**/*.geotiff
+!estimated_OGM/**/*.json
+!estimated_OGM/**/*.geojson
+!estimated_OGM/**/*.png
+!estimated_OGM/**/*.jpg
+!estimated_OGM/**/*.jpeg
+!estimated_OGM/**/*.csv
+!estimated_OGM/**/*.xml
 
 # Jupyter
 .ipynb_checkpoints/
@@ -47,12 +72,18 @@ estimated_OGM/
 .idea/
 .vscode/
 
-# Virtual env (your IF_module)
-IF_module/
-
 # Outputs
 georeferenced_drone_images/
-
-# Geospatial sidecars
-*.aux.xml
-*.tif.aux.xml
+!georeferenced_drone_images/
+!georeferenced_drone_images/**/
+!georeferenced_drone_images/**/*.tif
+!georeferenced_drone_images/**/*.tiff
+!georeferenced_drone_images/**/*.geotif
+!georeferenced_drone_images/**/*.geotiff
+!georeferenced_drone_images/**/*.json
+!georeferenced_drone_images/**/*.geojson
+!georeferenced_drone_images/**/*.png
+!georeferenced_drone_images/**/*.jpg
+!georeferenced_drone_images/**/*.jpeg
+!georeferenced_drone_images/**/*.csv
+!georeferenced_drone_images/**/*.xml
