@@ -9,6 +9,7 @@ import os
 import queue
 import json
 import math
+import re
 # import shutil
 import uuid
 from datetime import datetime, timezone
@@ -90,6 +91,7 @@ class GlobalCache:
         self.initial_nd_ogm_metadata = None
         self.uav_common_base = None
         self.takeoff_ground_altitude_m = None
+        self.floodsim_playback_step = 0
 
         self.objects_tracking_started = False
     def get(self, key, default=None):
@@ -135,6 +137,31 @@ _last_upload = time.monotonic() - UPLOAD_INTERVAL
 _upload_lock = threading.Lock()
 # --------------------------------------------------------
 MAX_WORKERS = min(8, (os.cpu_count() or 4) * 2)
+
+FLOODSIM_PLAYBACK_SCHEDULE = [
+    ("1", "2021-07-14T15_00_00"),
+    ("1", "2021-07-14T16_30_00"),
+    ("1", "2021-07-14T18_00_00"),
+    ("1", "2021-07-14T20_00_00"),
+    ("1", "2021-07-14T21_30_00"),
+    ("1", "2021-07-14T23_00_00"),
+    ("2", "2021-07-14T23_30_00"),
+    ("2", "2021-07-15T01_00_00"),
+    ("2", "2021-07-15T02_00_00"),
+    ("2", "2021-07-15T03_30_00"),
+    ("2", "2021-07-15T05_00_00"),
+    ("2", "2021-07-15T07_00_00"),
+    ("3", "2021-07-15T11_00_00"),
+    ("3", "2021-07-15T12_30_00"),
+    ("3", "2021-07-15T14_00_00"),
+    ("3", "2021-07-15T15_30_00"),
+    ("3", "2021-07-15T17_00_00"),
+    ("3", "2021-07-15T19_00_00"),
+]
+FLOODSIM_FILENAME_RE = re.compile(
+    r"waterdepth-ahrtal_pilot_(\d+)-rev4-(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2})\.(?:tif|tiff)$",
+    re.IGNORECASE,
+)
 
 
 # --------------------------------------------------------
@@ -1173,6 +1200,7 @@ def initialize_processing():
                             ogm_counter=0,
                             initial_nd_ogm_metadata=None,
                             takeoff_ground_altitude_m=None,
+                            floodsim_playback_step=0,
                             kf_states={},
                             objects_tracking_started=False
                         )
@@ -1859,6 +1887,10 @@ def predict_ogm_fire(
     )
 
 # -----------------------------------------------------------------
+def upload_due():
+    with _upload_lock:
+        return time.monotonic() - _last_upload >= UPLOAD_INTERVAL
+# -----------------------------------------------------------------
 def should_upload_now():
     global _last_upload
     with _upload_lock:
@@ -1867,6 +1899,30 @@ def should_upload_now():
             _last_upload = now
             return True
         return False
+# -----------------------------------------------------------------
+def get_next_scheduled_floodsim_file(base_dir="downloads/FloodSim"):
+    step = int(global_cache.get("floodsim_playback_step", 0) or 0)
+    if step >= len(FLOODSIM_PLAYBACK_SCHEDULE):
+        return None, step, None
+
+    if not os.path.isdir(base_dir):
+        return None, step, FLOODSIM_PLAYBACK_SCHEDULE[step]
+
+    target_pilot, target_timestamp = FLOODSIM_PLAYBACK_SCHEDULE[step]
+    matches = []
+    for root_dir, _, files in os.walk(base_dir):
+        for filename in files:
+            match = FLOODSIM_FILENAME_RE.match(filename)
+            if not match:
+                continue
+            pilot, timestamp = match.groups()
+            if pilot == target_pilot and timestamp == target_timestamp:
+                matches.append(os.path.join(root_dir, filename))
+
+    if not matches:
+        return None, step, FLOODSIM_PLAYBACK_SCHEDULE[step]
+    matches.sort()
+    return matches[0], step, FLOODSIM_PLAYBACK_SCHEDULE[step]
 # -----------------------------------------------------------------
 def publish_initial_nd_ogm(disaster_type, ogm_path):
     """
@@ -1954,33 +2010,73 @@ def estimate_nd_status():
         prediction_path = "downloads/FloodSim" if disaster_type == "Flood" else "downloads/FireSim"
         # ----------------------------------------------------------
         try:
-            for pred_file in sorted(os.listdir(prediction_path),
-                                    key=lambda x_: os.path.getmtime(os.path.join(prediction_path, x_))):
-                if pred_file.lower().endswith('.tif'):
-                    pred_file_path = os.path.join(prediction_path, pred_file)
-                    logger.info(f"prediction file ---> {pred_file_path}")
-                    if disaster_type == 'Flood':
-                        fuse_ogm_with_depth(
-                            ogm_path,
-                            pred_file_path,
-                            mapping_="logistic",
-                            mapping_params={"h50": 0.50, "s": 0.50},
-                            fusion="logit_pool",
-                            alpha=0.75,
+            if disaster_type == 'Flood':
+                if config.FLOODSIM_PLAYBACK_MODE == "brk_trial":
+                    use_scheduled_playback = upload_due()
+                    if use_scheduled_playback:
+                        pred_file_path, playback_step, schedule_item = get_next_scheduled_floodsim_file(prediction_path)
+                    else:
+                        pred_file_path, playback_step, schedule_item = None, None, None
+                else:
+                    pred_file_path, playback_step, schedule_item = None, None, None
+                    if os.path.isdir(prediction_path):
+                        for pred_file in sorted(os.listdir(prediction_path),
+                                                key=lambda x_: os.path.getmtime(os.path.join(prediction_path, x_))):
+                            if pred_file.lower().endswith(('.tif', '.tiff')):
+                                pred_file_path = os.path.join(prediction_path, pred_file)
+                                break
+                    else:
+                        logger.info(f"Error in prediction models due to [Errno 2] No such file or directory: '{prediction_path}'")
+
+                if pred_file_path:
+                    if config.FLOODSIM_PLAYBACK_MODE == "brk_trial":
+                        logger.info(
+                            f"FloodSim playback file ---> {pred_file_path} "
+                            f"(step={playback_step + 1}/{len(FLOODSIM_PLAYBACK_SCHEDULE)})"
                         )
-                        # ----------------------------------------------------------
+                    else:
+                        logger.info(f"prediction file ---> {pred_file_path}")
+                    fuse_ogm_with_depth(
+                        ogm_path,
+                        pred_file_path,
+                        mapping_="logistic",
+                        mapping_params={"h50": 0.50, "s": 0.50},
+                        fusion="logit_pool",
+                        alpha=0.75,
+                    )
+                    # ----------------------------------------------------------
+                    if config.FLOODSIM_PLAYBACK_MODE == "brk_trial":
+                        global_cache.set("floodsim_playback_step", playback_step + 1)
+                        logger.info(
+                            f"FloodSim playback prediction is performed "
+                            f"(step={playback_step + 1}/{len(FLOODSIM_PLAYBACK_SCHEDULE)})"
+                        )
+                    else:
                         logger.info("prediction is performed")
-                        # ----------------------------------------------------------
-                        result = mask_geotiff_with_polygon_exact(ogm_path, global_cache.get('roi'), ogm_path)
-                        if result:
-                            logger.info(f"Masked GeoTIFF saved to {result}")
-                        else:
-                            logger.info("Error occurred while masking the GeoTIFF.")
-                        # ----------------------------------------------------------
-                        if os.path.exists(pred_file_path):
-                            os.remove(pred_file_path)
-                        break
-                    elif disaster_type == "Fire":
+                    # ----------------------------------------------------------
+                    result = mask_geotiff_with_polygon_exact(ogm_path, global_cache.get('roi'), ogm_path)
+                    if result:
+                        logger.info(f"Masked GeoTIFF saved to {result}")
+                    else:
+                        logger.info("Error occurred while masking the GeoTIFF.")
+                    # ----------------------------------------------------------
+                    if config.FLOODSIM_PLAYBACK_MODE != "brk_trial" and os.path.exists(pred_file_path):
+                        os.remove(pred_file_path)
+                elif config.FLOODSIM_PLAYBACK_MODE == "brk_trial" and use_scheduled_playback:
+                    if schedule_item is None:
+                        logger.info("FloodSim playback schedule is complete; no simulation raster fused.")
+                    else:
+                        logger.info(
+                            f"Waiting for scheduled FloodSim raster: "
+                            f"pilot_{schedule_item[0]} {schedule_item[1]} "
+                            f"(step={playback_step + 1}/{len(FLOODSIM_PLAYBACK_SCHEDULE)})"
+                        )
+            else:
+                for pred_file in sorted(os.listdir(prediction_path),
+                                        key=lambda x_: os.path.getmtime(os.path.join(prediction_path, x_))):
+                    if pred_file.lower().endswith(('.tif', '.tiff')):
+                        pred_file_path = os.path.join(prediction_path, pred_file)
+                        logger.info(f"prediction file ---> {pred_file_path}")
                         predict_ogm_fire(
                             ogm_path,
                             pred_file_path,

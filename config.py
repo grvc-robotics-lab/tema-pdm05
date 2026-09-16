@@ -54,6 +54,7 @@ OpenTopography_api_key = os.getenv("OpenTopography_api_key", '56da0f69ae202d4d94
 OGM_ND_RESOLUTION = os.getenv("OGM_ND_RESOLUTION", 5)
 OGM_OBJ_RESOLUTION = os.getenv("OGM_OBJ_RESOLUTION", 5)
 OGM_UPLOAD_INTERVAL_SEC = float(os.getenv("OGM_UPLOAD_INTERVAL_SEC", 10 * 60.0))
+FLOODSIM_PLAYBACK_MODE = os.getenv("FLOODSIM_PLAYBACK_MODE", "immediate").strip().lower()
 SCALING_FACTOR = os.getenv("SCALING_FACTOR", 1)
 TRACK_CONFIRM_UPDATES = os.getenv("TRACK_CONFIRM_UPDATES", 1)
 USE_TAKEOFF_ALTITUDE_FOR_GEOREF = os.getenv("USE_TAKEOFF_ALTITUDE_FOR_GEOREF", "True").lower() == "true"
