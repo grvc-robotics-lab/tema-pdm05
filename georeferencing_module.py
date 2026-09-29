@@ -6,11 +6,47 @@ from math import sqrt, radians, degrees, sin, cos, tan, atan, pi
 from osgeo import gdal, osr
 import rasterio
 import json
-from pyproj import Transformer
+from pyproj import Transformer, datadir
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from logging_config import logger
 import config
+
+
+_GEOID_TRANSFORMER = None
+
+
+def correct_ellipsoidal_altitude_to_geoid_height(lon, lat, altitude_m):
+    """Convert WGS84 ellipsoidal altitude to geoid/orthometric height."""
+    global _GEOID_TRANSFORMER
+
+    if _GEOID_TRANSFORMER is None:
+        grid_name = config.GEOID_GRID
+        grid_paths = [grid_name]
+        if not os.path.isabs(grid_name):
+            grid_paths.extend(
+                os.path.join(directory, grid_name)
+                for directory in (os.getenv("PROJ_DATA"), os.getenv("PROJ_LIB"), datadir.get_data_dir())
+                if directory
+            )
+        grid_path = next((path for path in grid_paths if os.path.isfile(path)), None)
+        if grid_path is None:
+            raise FileNotFoundError(
+                f"Geoid grid '{grid_name}' not found. Set GEOID_GRID to its full path."
+            )
+        _GEOID_TRANSFORMER = Transformer.from_pipeline(
+            "+proj=pipeline "
+            f"+step +proj=vgridshift +grids={os.path.abspath(grid_path)} +multiplier=-1"
+        )
+
+    _, _, corrected_altitude = _GEOID_TRANSFORMER.transform(lon, lat, altitude_m)
+    if not np.isfinite(corrected_altitude):
+        raise RuntimeError(
+            "Geoid altitude correction failed. Check that the PROJ geoid grid "
+            f"'{config.GEOID_GRID}' is installed and covers lon={lon}, lat={lat}."
+        )
+    geoid_height = altitude_m - corrected_altitude
+    return float(corrected_altitude), float(geoid_height)
 
 
 def main(natural_disaster, flag, ground_resolution, target_base_name=None, takeoff_ground_altitude_m=None):
@@ -376,13 +412,21 @@ def create_metadata(json_data, takeoff_ground_altitude_m=None):
             f"camera_altitude_m={camera_alt:.3f}"
         )
     else:
-        camera_alt = camera_alt_gps
-        logger.info(
-            f"Georeferencing altitude: source=metadata GPSAltitude, "
-            # f"gps_altitude_m={camera_alt_gps:.3f}, "
-            # f"relative_altitude_m={camera_alt_rel:.3f}, "
-            # f"camera_altitude_m={camera_alt:.3f}"
-        )
+        if config.CORRECT_GPS_ALTITUDE_WITH_GEOID:
+            camera_alt, geoid_height = correct_ellipsoidal_altitude_to_geoid_height(
+                camera_lon, camera_lat, camera_alt_gps
+            )
+            logger.info(
+                f"Georeferencing altitude: source=metadata GPSAltitude corrected with "
+                f"{config.GEOID_VERTICAL_CRS}/{config.GEOID_GRID}, raw_gps_altitude_m={camera_alt_gps:.3f}, "
+                f"geoid_height_m={geoid_height:.3f}, camera_altitude_m={camera_alt:.3f}"
+            )
+        else:
+            camera_alt = camera_alt_gps
+            logger.info(
+                f"Georeferencing altitude: source=metadata GPSAltitude raw, "
+                f"gps_altitude_m={camera_alt_gps:.3f}, camera_altitude_m={camera_alt:.3f}"
+            )
     gimbal_roll = radians(float(json_data['GimbalRollDegree']))
     gimbal_pitch = radians(float(json_data['GimbalPitchDegree']))
     gimbal_yaw = radians(float(json_data['GimbalYawDegree']))

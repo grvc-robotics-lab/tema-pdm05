@@ -32,6 +32,10 @@ SHELL ["conda", "run", "-n", "geo_env", "/bin/bash", "-c"]
 # Set PROJ_LIB environment variable
 ENV PROJ_LIB=/opt/conda/envs/geo_env/share/proj
 
+# Global EGM96 geoid grid used to convert WGS84 ellipsoidal DJI altitudes
+# to DEM-compatible orthometric/MSL heights.
+RUN wget -q -O "${PROJ_LIB}/us_nga_egm96_15.tif" https://cdn.proj.org/us_nga_egm96_15.tif
+
 # Set environment variables for the application
 ENV HOST=
 ENV PORT=
@@ -60,6 +64,9 @@ ENV FLOODSIM_PLAYBACK_MODE=immediate
 ENV SCALING_FACTOR=1
 ENV USE_TAKEOFF_ALTITUDE_FOR_GEOREF=True
 ENV TAKEOFF_GROUND_ALTITUDE_M=150.3
+ENV CORRECT_GPS_ALTITUDE_WITH_GEOID=True
+ENV GEOID_VERTICAL_CRS=EPSG:5773
+ENV GEOID_GRID=/opt/conda/envs/geo_env/share/proj/us_nga_egm96_15.tif
 # Expose the necessary port
 EXPOSE 5505
 

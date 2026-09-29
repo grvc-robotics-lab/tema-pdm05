@@ -59,6 +59,9 @@ SCALING_FACTOR = os.getenv("SCALING_FACTOR", 1)
 TRACK_CONFIRM_UPDATES = os.getenv("TRACK_CONFIRM_UPDATES", 1)
 USE_TAKEOFF_ALTITUDE_FOR_GEOREF = os.getenv("USE_TAKEOFF_ALTITUDE_FOR_GEOREF", "True").lower() == "true"
 TAKEOFF_GROUND_ALTITUDE_M = float(os.getenv("TAKEOFF_GROUND_ALTITUDE_M", 150.3))
+CORRECT_GPS_ALTITUDE_WITH_GEOID = os.getenv("CORRECT_GPS_ALTITUDE_WITH_GEOID", "True").lower() == "true"
+GEOID_VERTICAL_CRS = os.getenv("GEOID_VERTICAL_CRS", "EPSG:5773")
+GEOID_GRID = os.getenv("GEOID_GRID", "us_nga_egm96_15.tif")
 
 if not OpenTopography_api_key:
     logger.error("No OpenTopography_api_key")
