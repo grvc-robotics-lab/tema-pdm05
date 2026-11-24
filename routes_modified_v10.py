@@ -14,6 +14,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import unquote, urlparse
 
 # Third‑party libraries
 # import cv2
@@ -92,6 +93,8 @@ class GlobalCache:
         self.uav_common_base = None
         self.takeoff_ground_altitude_m = None
         self.floodsim_playback_step = 0
+        self.floodsim_playback_started_at = None
+        self.floodsim_waiting_for = None
 
         self.objects_tracking_started = False
     def get(self, key, default=None):
@@ -162,6 +165,91 @@ FLOODSIM_FILENAME_RE = re.compile(
     r"waterdepth-ahrtal_pilot_(\d+)-rev4-(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2})\.(?:tif|tiff)$",
     re.IGNORECASE,
 )
+
+DMALIAN_FLOODSIM_FILENAME_RE = re.compile(
+    r"waterdepth-greece_demo_(\d+)-rev(\d+)-"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2})\.(?:tif|tiff)$",
+    re.IGNORECASE,
+)
+# DMALIAN_ROUND_1_TIMESTAMPS = (
+#     "2023-09-27T06_00_00", "2023-09-27T06_30_00",
+#     "2023-09-27T07_00_00", "2023-09-27T07_30_00",
+#     "2023-09-27T08_00_00", "2023-09-27T08_30_00",
+#     "2023-09-27T09_00_00", "2023-09-27T09_30_00",
+#     "2023-09-27T10_00_00", "2023-09-27T10_30_00",
+#     "2023-09-27T11_00_00", "2023-09-27T11_30_00",
+#     "2023-09-27T12_00_00", "2023-09-27T12_30_00",
+#     "2023-09-27T13_00_00", "2023-09-27T13_30_00",
+#     "2023-09-27T14_00_00",
+# )
+
+DMALIAN_ROUND_1_TIMESTAMPS = (
+    "2023-09-26T22_00_00", "2023-09-26T22_30_00",
+    "2023-09-26T23_00_00", "2023-09-26T23_30_00",
+    "2023-09-27T00_00_00", "2023-09-27T00_30_00",
+    "2023-09-27T01_00_00", "2023-09-27T01_30_00",
+    "2023-09-27T02_00_00", "2023-09-27T02_30_00",
+    "2023-09-27T03_00_00", "2023-09-27T03_30_00",
+    "2023-09-27T04_00_00", "2023-09-27T04_30_00",
+    "2023-09-27T05_00_00", "2023-09-27T05_30_00",
+    "2023-09-27T06_00_00",
+)
+
+
+
+# demo_2 repeats demo_1 byte-for-byte from 08:00 through 14:00. Only its
+# four new states are replayed so identical model evidence is not fused twice.
+# DMALIAN_ROUND_2_TIMESTAMPS = (
+#     "2023-09-27T14_30_00", "2023-09-27T15_00_00",
+#     "2023-09-27T15_30_00", "2023-09-27T16_00_00",
+# )
+
+DMALIAN_ROUND_2_TIMESTAMPS = (
+    "2023-09-27T07_00_00", "2023-09-27T07_30_00",
+    "2023-09-27T08_00_00", "2023-09-27T08_30_00",
+    "2023-09-27T09_00_00", "2023-09-27T09_30_00",
+    "2023-09-27T10_00_00", "2023-09-27T10_30_00",
+    "2023-09-27T11_00_00", "2023-09-27T11_30_00",
+    "2023-09-27T12_00_00", "2023-09-27T12_30_00",
+    "2023-09-27T13_00_00", "2023-09-27T13_30_00",
+    "2023-09-27T14_00_00", "2023-09-27T14_30_00",
+    "2023-09-27T15_00_00",
+)
+
+
+
+def build_dmalian_floodsim_schedule(round_duration_sec=None):
+    """Build two equal-duration playback rounds with chronologically unique states."""
+    duration = float(
+        config.DMALIAN_FLOODSIM_ROUND_DURATION_SEC
+        if round_duration_sec is None
+        else round_duration_sec
+    )
+    if duration <= 0:
+        raise ValueError("DMALIAN_FLOODSIM_ROUND_DURATION_SEC must be greater than zero.")
+
+    schedule = []
+    rounds = (
+        ("1", DMALIAN_ROUND_1_TIMESTAMPS),
+        ("2", DMALIAN_ROUND_2_TIMESTAMPS),
+    )
+    for round_number, (demo, timestamps) in enumerate(rounds, start=1):
+        round_start = (round_number - 1) * duration
+        # Round 1 starts immediately and leaves a short hold on its final state.
+        # Round 2 starts at 30 minutes and reaches its final state at 60 minutes.
+        interval_divisor = len(timestamps) if round_number == 1 else len(timestamps) - 1
+        step_interval = duration / interval_divisor
+        for index, timestamp in enumerate(timestamps):
+            schedule.append((
+                demo,
+                timestamp,
+                round_start + index * step_interval,
+                round_number,
+            ))
+    return tuple(schedule)
+
+
+DMALIAN_FLOODSIM_PLAYBACK_SCHEDULE = build_dmalian_floodsim_schedule()
 
 
 # --------------------------------------------------------
@@ -750,150 +838,172 @@ def fetch_burnt_area(notification, polygon):
 # ---------------------------------------------------------------
 # Downloading EOFloodExtent
 # ---------------------------------------------------------------
-def download_tif_file(entity, polygon):
-    """
-    Downloads a .tif file from the entity's data URL if the notification corresponds to "EOFloodExtent".
-    """
-    minio_success = False
+def _parse_minio_file_url(file_url):
+    """Return the bucket, object key, and filename encoded in a MinIO URL."""
+    parsed = urlparse(file_url)
+    path_parts = [
+        unquote(part)
+        for part in parsed.path.strip("/").split("/")
+        if part
+    ]
+    if parsed.scheme not in {"http", "https"} or len(path_parts) < 2:
+        raise ValueError(f"Invalid MinIO file URL: {file_url}")
+
+    return path_parts[0], "/".join(path_parts[1:]), path_parts[-1]
+
+
+def _crop_satellite_tif_to_aoi(file_path, polygon):
+    """Crop a downloaded satellite raster and atomically stage it for fusion."""
+    coordinates = polygon.get("coordinates") if isinstance(polygon, dict) else polygon
+    ring = (
+        coordinates[0]
+        if (
+            isinstance(coordinates, list)
+            and coordinates
+            and isinstance(coordinates[0], list)
+            and coordinates[0]
+            and isinstance(coordinates[0][0], list)
+        )
+        else coordinates
+    )
+    if not isinstance(ring, list) or len(ring) < 3:
+        raise ValueError("The alert AOI does not contain a valid polygon ring.")
+
+    ring = list(ring)
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+
+    poly_ll = Polygon(ring)
+    if not poly_ll.is_valid:
+        poly_ll = poly_ll.buffer(0)
+    if poly_ll.is_empty:
+        raise ValueError("The alert AOI polygon is empty after validation.")
+
+    cropped_path = f"{file_path}.cropped.tmp.tif"
     try:
-        data_value = entity.get('data', {}).get('value', {})
-        file_url = data_value.get('href', {})
+        with rasterio.open(file_path) as src:
+            if src.crs is None:
+                raise ValueError("Satellite raster has no CRS.")
 
-        if not file_url:
-            logger.error("No valid download URL found in entity.")
-            return None
-
-        bucket_dlr = file_url.split('/')[-4]
-        file_name_minio = f"{file_url.split('/')[-3]}/{file_url.split('/')[-2]}/{file_url.split('/')[-1]}"
-        file_name = file_url.split("/")[-1]
-        file_path = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
-
-        try:
-            downloaded_file_path = minio_client.download_file(bucket_dlr, file_name_minio, file_path)
-
-            if downloaded_file_path:
-                logger.info(f"File downloaded successfully to {downloaded_file_path}")
-                minio_success = True
+            raster_crs = CRS.from_user_input(src.crs)
+            wgs84 = CRS.from_epsg(4326)
+            if raster_crs != wgs84:
+                to_raster = Transformer.from_crs(
+                    wgs84, raster_crs, always_xy=True
+                ).transform
+                poly_dst = shapely_transform(to_raster, poly_ll)
             else:
-                logger.error("File download failed. via MINIO")
+                poly_dst = poly_ll
 
-            input_tif = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
-            output_tif = file_name
+            raster_extent = box(
+                src.bounds.left,
+                src.bounds.bottom,
+                src.bounds.right,
+                src.bounds.top,
+            )
+            if not poly_dst.intersects(raster_extent):
+                raise ValueError(
+                    "Alert AOI does not intersect the satellite raster extent "
+                    f"{src.bounds} ({raster_crs.to_string()})."
+                )
 
-            try:
-                ring = polygon[0] if (isinstance(polygon, list) and polygon and isinstance(polygon[0], list)
-                                      and polygon and isinstance(polygon[0][0], list)) else polygon
-                if ring[0] != ring[-1]:
-                    ring = ring + [ring[0]]
+            nodata = src.nodata if src.nodata is not None else 0
+            out_image, out_transform = mask(
+                src,
+                shapes=[mapping(poly_dst)],
+                crop=True,
+                filled=True,
+                nodata=nodata,
+            )
+            out_meta = src.meta.copy()
+            out_meta.update({
+                "driver": "GTiff",
+                "height": out_image.shape[1],
+                "width": out_image.shape[2],
+                "transform": out_transform,
+                "nodata": nodata,
+            })
 
-                poly_ll = Polygon(ring)
-                if not poly_ll.is_valid:
-                    poly_ll = poly_ll.buffer(0)
+        with rasterio.open(cropped_path, "w", **out_meta) as dest:
+            dest.write(out_image)
 
-                with rasterio.open(input_tif) as src:
-                    if src.crs is None:
-                        raise ValueError("Raster has no CRS. Cannot reproject polygon.")
+        os.replace(cropped_path, file_path)
+        logger.info(f"Satellite cropping complete. Staged for fusion at {file_path}")
+        return file_path
+    finally:
+        if os.path.exists(cropped_path):
+            os.remove(cropped_path)
 
-                    raster_crs = CRS.from_user_input(src.crs)
-                    wgs84 = CRS.from_epsg(4326)
 
-                    if raster_crs != wgs84:
-                        to_raster = Transformer.from_crs(wgs84, raster_crs, always_xy=True).transform
-                        poly_dst = shapely_transform(to_raster, poly_ll)
-                    else:
-                        poly_dst = poly_ll
+def download_tif_file(entity, polygon):
+    """Download an EOFloodExtent raster, crop it to the AOI, and stage it."""
+    data_value = entity.get("data", {}).get("value", {})
+    file_url = data_value.get("href") if isinstance(data_value, dict) else None
+    if not isinstance(file_url, str) or not file_url:
+        logger.error("No valid satellite download URL found in entity.")
+        return None
 
-                    raster_extent = box(src.bounds.left,
-                                        src.bounds.bottom,
-                                        src.bounds.right,
-                                        src.bounds.top)
+    try:
+        bucket_name, object_name, file_name = _parse_minio_file_url(file_url)
+    except ValueError as exc:
+        logger.error(f"Invalid satellite file URL: {exc}")
+        return None
 
-                    if not poly_dst.intersects(raster_extent):
-                        logger.warning(
-                            f"Polygon does not intersect raster extent. "
-                            f"Raster bounds (in {raster_crs.to_string()}): {src.bounds}"
-                        )
-                        return None
+    output_dir = "downloads/satellite_imgs/Flood"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, file_name)
+    downloaded_path = None
 
-                    shapes = [mapping(poly_dst)]
-                    out_image, out_transform = mask(src,
-                                                    shapes=shapes,
-                                                    crop=True,
-                                                    filled=False)
+    try:
+        downloaded_path = minio_client.download_file(
+            bucket_name,
+            object_name,
+            file_path,
+        )
+        if downloaded_path:
+            logger.info(
+                "Satellite file downloaded via MinIO: "
+                f"bucket={bucket_name}, object={object_name}, path={downloaded_path}"
+            )
+    except Exception as exc:
+        logger.warning(
+            "Satellite MinIO download failed; attempting HTTP fallback: "
+            f"bucket={bucket_name}, object={object_name}, error={exc}"
+        )
 
-                    out_meta = src.meta.copy()
-                    out_meta.update({
-                        "driver": "GTiff",
-                        "height": out_image.shape[1],
-                        "width": out_image.shape[2],
-                        "transform": out_transform,
-                        "nodata": src.nodata if src.nodata is not None else 0
-                    })
-
-                with rasterio.open(output_tif, "w", **out_meta) as dest:
-                    dest.write(out_image)
-
-                logger.info(f"Cropping complete. Saved as {output_tif}")
-                return output_tif
-
-            except Exception as e:
-                logger.warning(f"Sat image was not cropped due to: {e}")
-                return None
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to download file: {e}")
-            return None
-    except Exception as e:
-        logger.warning(f"MinIO download failed: {e}, falling back to HTTP")
-    # ---------------------------------------------------------------
-    # VIA HTTP
-    # ---------------------------------------------------------------
-    if not minio_success:
+    if not downloaded_path:
+        partial_path = f"{file_path}.part"
         try:
-            """
-                Downloads a .tif file from the entity's data URL if the notification corresponds to "EOFloodExtent".
-            """
-            data_value = entity.get('data', {}).get('value', {})
-            file_url = data_value.get('href')
-            if file_url:
-                file_name = file_url.split("/")[-1]
-                logger.info(f"Downloading {file_name} from {file_url}...")
-                try:
-                    response = requests.get(file_url, stream=True)
-                    response.raise_for_status()  # Raise an error for bad responses
-                    file_name = os.path.join(f'downloads/satellite_imgs/Flood', file_name)
-                    with open(file_name, "wb") as file:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            file.write(chunk)
-                    logger.info(f"Download completed: {file_name}")
-                    # ---------------------------------------------------------------
-                    input_tif = file_name
-                    output_tif = file_name
-                    polygon = Polygon(polygon[0])
-                    geojson_polygon = [json.loads(gpd.GeoSeries([polygon]).to_json())['features'][0]['geometry']]
-                    with rasterio.open(input_tif) as src:
-                        out_image, out_transform = mask(src, geojson_polygon, crop=True)
-                        out_meta = src.meta.copy()
-                        out_meta.update({
-                            "driver": "GTiff",
-                            "height": out_image.shape[1],
-                            "width": out_image.shape[2],
-                            "transform": out_transform,
-                            "nodata": src.nodata if src.nodata is not None else 0
-                        })
-                        with rasterio.open(output_tif, "w", **out_meta) as dest:
-                            dest.write(out_image)
-                    # ---------------------------------------------------------------
-                    return output_tif
+            logger.info(f"Downloading satellite file via HTTP: {file_url}")
+            with requests.get(file_url, stream=True, timeout=(10, 120)) as response:
+                response.raise_for_status()
+                with open(partial_path, "wb") as file_handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            file_handle.write(chunk)
+            os.replace(partial_path, file_path)
+            downloaded_path = file_path
+            logger.info(f"Satellite file downloaded via HTTP to {downloaded_path}")
+        except Exception as exc:
+            logger.error(
+                f"Satellite download failed via both MinIO and HTTP: {exc}",
+                exc_info=True,
+            )
+        finally:
+            if os.path.exists(partial_path):
+                os.remove(partial_path)
 
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Failed to download file via hyperref: {e}")
-                    return None
-            else:
-                logger.error("No valid download URL found in entity.")
-        except Exception as e:
-            logger.error(f"Both MinIO and HTTP downloads failed. MinIO error, HTTP error: {e}")
-            return None
+    if not downloaded_path or not os.path.isfile(downloaded_path):
+        return None
+
+    try:
+        return _crop_satellite_tif_to_aoi(downloaded_path, polygon)
+    except Exception as exc:
+        logger.error(f"Satellite preprocessing failed: {exc}", exc_info=True)
+        # Never expose an unprocessed raster to the mode-3 fusion directory.
+        if os.path.exists(downloaded_path):
+            os.remove(downloaded_path)
+        return None
 
 # ---------------------------------------------------------------
 def process_notification(notification):
@@ -1201,6 +1311,8 @@ def initialize_processing():
                             initial_nd_ogm_metadata=None,
                             takeoff_ground_altitude_m=None,
                             floodsim_playback_step=0,
+                            floodsim_playback_started_at=None,
+                            floodsim_waiting_for=None,
                             kf_states={},
                             objects_tracking_started=False
                         )
@@ -1608,16 +1720,21 @@ def fuse_ogm_with_depth(
         resampling=resampling,
     )
 
-    # Valid where we have a finite depth AND OGM is not nodata
-    valid_depth = np.isfinite(depth_on_ogm)
+    finite_depth = np.isfinite(depth_on_ogm)
+    # Zero depth means no simulated flood evidence; preserve the current OGM.
+    valid_depth = finite_depth & (depth_on_ogm > 0.0)
     if np.isnan(ogm_nodata):
         valid_ogm = ~np.isnan(ogm)
     else:
         valid_ogm = ogm != ogm_nodata
 
+    if not np.any(finite_depth & valid_ogm):
+        raise ValueError("No overlapping valid pixels between OGM and depth raster.")
+
     valid = valid_depth & valid_ogm
     if not np.any(valid):
-        raise ValueError("No overlapping valid pixels between OGM and depth raster.")
+        logger.info("FloodSim contains no positive depth in the OGM; leaving OGM unchanged.")
+        return ogm_file
 
     # --- Map depth -> probability ---
     p_from_depth = np.zeros_like(depth_on_ogm, dtype=np.float32)
@@ -1924,6 +2041,47 @@ def get_next_scheduled_floodsim_file(base_dir="downloads/FloodSim"):
     matches.sort()
     return matches[0], step, FLOODSIM_PLAYBACK_SCHEDULE[step]
 # -----------------------------------------------------------------
+def get_next_scheduled_dmalian_floodsim_file(base_dir="downloads/FloodSim", now=None):
+    """Return the next due DMALIAN raster without relying on notification order."""
+    step = int(global_cache.get("floodsim_playback_step", 0) or 0)
+    if step >= len(DMALIAN_FLOODSIM_PLAYBACK_SCHEDULE):
+        return None, step, None, False
+
+    schedule_item = DMALIAN_FLOODSIM_PLAYBACK_SCHEDULE[step]
+    target_demo, target_timestamp, due_offset, _ = schedule_item
+    matches = []
+    if os.path.isdir(base_dir):
+        for root_dir, _, files in os.walk(base_dir):
+            for filename in files:
+                match = DMALIAN_FLOODSIM_FILENAME_RE.match(filename)
+                if not match:
+                    continue
+                demo, _revision, timestamp = match.groups()
+                if demo == target_demo and timestamp == target_timestamp:
+                    matches.append(os.path.join(root_dir, filename))
+
+    # Start the two-round clock only after the first expected raster is present.
+    started_at = global_cache.get("floodsim_playback_started_at")
+    if started_at is None:
+        if not matches:
+            return None, step, schedule_item, False
+        started_at = time.monotonic() if now is None else float(now)
+        global_cache.set("floodsim_playback_started_at", started_at)
+        logger.info(
+            "DMALIAN FloodSim playback started "
+            f"(round_duration={config.DMALIAN_FLOODSIM_ROUND_DURATION_SEC:.1f}s, "
+            f"states={len(DMALIAN_FLOODSIM_PLAYBACK_SCHEDULE)})."
+        )
+
+    current_time = time.monotonic() if now is None else float(now)
+    if current_time - float(started_at) < due_offset:
+        return None, step, schedule_item, False
+    if not matches:
+        return None, step, schedule_item, True
+
+    matches.sort()
+    return matches[0], step, schedule_item, True
+# -----------------------------------------------------------------
 def publish_initial_nd_ogm(disaster_type, ogm_path):
     """
     Upload the neutral OGM generated during alert initialization so the newly
@@ -2011,12 +2169,21 @@ def estimate_nd_status():
         # ----------------------------------------------------------
         try:
             if disaster_type == 'Flood':
-                if config.FLOODSIM_PLAYBACK_MODE == "brk_trial":
+                playback_mode = config.FLOODSIM_PLAYBACK_MODE
+                scheduled_mode = playback_mode in {"brk_trial", "dmalian_trial"}
+                playback_due = False
+
+                if playback_mode == "brk_trial":
                     use_scheduled_playback = upload_due()
                     if use_scheduled_playback:
                         pred_file_path, playback_step, schedule_item = get_next_scheduled_floodsim_file(prediction_path)
+                        playback_due = True
                     else:
                         pred_file_path, playback_step, schedule_item = None, None, None
+                elif playback_mode == "dmalian_trial":
+                    pred_file_path, playback_step, schedule_item, playback_due = (
+                        get_next_scheduled_dmalian_floodsim_file(prediction_path)
+                    )
                 else:
                     pred_file_path, playback_step, schedule_item = None, None, None
                     if os.path.isdir(prediction_path):
@@ -2029,10 +2196,17 @@ def estimate_nd_status():
                         logger.info(f"Error in prediction models due to [Errno 2] No such file or directory: '{prediction_path}'")
 
                 if pred_file_path:
-                    if config.FLOODSIM_PLAYBACK_MODE == "brk_trial":
+                    if playback_mode == "brk_trial":
                         logger.info(
                             f"FloodSim playback file ---> {pred_file_path} "
                             f"(step={playback_step + 1}/{len(FLOODSIM_PLAYBACK_SCHEDULE)})"
+                        )
+                    elif playback_mode == "dmalian_trial":
+                        _, _, _, round_number = schedule_item
+                        logger.info(
+                            f"DMALIAN FloodSim playback file ---> {pred_file_path} "
+                            f"(round={round_number}, "
+                            f"step={playback_step + 1}/{len(DMALIAN_FLOODSIM_PLAYBACK_SCHEDULE)})"
                         )
                     else:
                         logger.info(f"prediction file ---> {pred_file_path}")
@@ -2045,11 +2219,18 @@ def estimate_nd_status():
                         alpha=0.75,
                     )
                     # ----------------------------------------------------------
-                    if config.FLOODSIM_PLAYBACK_MODE == "brk_trial":
+                    if scheduled_mode:
                         global_cache.set("floodsim_playback_step", playback_step + 1)
+                        global_cache.set("floodsim_waiting_for", None)
+                    if playback_mode == "brk_trial":
                         logger.info(
                             f"FloodSim playback prediction is performed "
                             f"(step={playback_step + 1}/{len(FLOODSIM_PLAYBACK_SCHEDULE)})"
+                        )
+                    elif playback_mode == "dmalian_trial":
+                        logger.info(
+                            f"DMALIAN FloodSim playback prediction is performed "
+                            f"(step={playback_step + 1}/{len(DMALIAN_FLOODSIM_PLAYBACK_SCHEDULE)})"
                         )
                     else:
                         logger.info("prediction is performed")
@@ -2060,9 +2241,9 @@ def estimate_nd_status():
                     else:
                         logger.info("Error occurred while masking the GeoTIFF.")
                     # ----------------------------------------------------------
-                    if config.FLOODSIM_PLAYBACK_MODE != "brk_trial" and os.path.exists(pred_file_path):
+                    if not scheduled_mode and os.path.exists(pred_file_path):
                         os.remove(pred_file_path)
-                elif config.FLOODSIM_PLAYBACK_MODE == "brk_trial" and use_scheduled_playback:
+                elif playback_mode == "brk_trial" and playback_due:
                     if schedule_item is None:
                         logger.info("FloodSim playback schedule is complete; no simulation raster fused.")
                     else:
@@ -2070,6 +2251,17 @@ def estimate_nd_status():
                             f"Waiting for scheduled FloodSim raster: "
                             f"pilot_{schedule_item[0]} {schedule_item[1]} "
                             f"(step={playback_step + 1}/{len(FLOODSIM_PLAYBACK_SCHEDULE)})"
+                        )
+                elif playback_mode == "dmalian_trial" and playback_due:
+                    target_demo, target_timestamp, _, round_number = schedule_item
+                    waiting_for = (target_demo, target_timestamp)
+                    if global_cache.get("floodsim_waiting_for") != waiting_for:
+                        global_cache.set("floodsim_waiting_for", waiting_for)
+                        logger.info(
+                            f"Waiting for scheduled DMALIAN FloodSim raster: "
+                            f"demo_{target_demo} {target_timestamp} "
+                            f"(round={round_number}, "
+                            f"step={playback_step + 1}/{len(DMALIAN_FLOODSIM_PLAYBACK_SCHEDULE)})"
                         )
             else:
                 for pred_file in sorted(os.listdir(prediction_path),
@@ -4678,7 +4870,7 @@ def load_image(image_path, mode):
 
     # ------------------------------------------------------------------------------
     def process_observation(observation_file, temp):
-        nonlocal data, geo_transform, spatial_ref, measurement_type
+        nonlocal data, geo_transform, spatial_ref, measurement_type, observ_nodata
         # Open the dataset with rasterio using a context manager.
         if temp != 1:
             with rasterio.open(observation_file) as src:
@@ -4689,9 +4881,9 @@ def load_image(image_path, mode):
                 geo_transform = geo_transform.to_gdal()
                 # Get the spatial reference (CRS)
                 spatial_ref = src.crs
-                observ_nodata_ = src.nodata
-                if observ_nodata_ is None and src.nodatavals:
-                    observ_nodata_ = src.nodatavals[0]
+                observ_nodata = src.nodata
+                if observ_nodata is None and src.nodatavals:
+                    observ_nodata = src.nodatavals[0]
 
             # ---------------------------------------------------------------
             # if spatial_ref is None:
@@ -4738,9 +4930,9 @@ def load_image(image_path, mode):
                 geo_transform = (origin_x, pixel_width, skew_x, origin_y, skew_y, pixel_height)
                 # Get the spatial reference.
                 spatial_ref = src.crs
-                observ_nodata_ = src.nodata
-                if observ_nodata_ is None and src.nodatavals:
-                    observ_nodata_ = src.nodatavals[0]
+                observ_nodata = src.nodata
+                if observ_nodata is None and src.nodatavals:
+                    observ_nodata = src.nodatavals[0]
             return
 
     if mode == 0:  # Load previous OGM
@@ -4784,7 +4976,9 @@ def load_image(image_path, mode):
 
     elif mode == 3:  # Load the Observation of ROI satellite images TFA-08/09
         try:
-            for observation in sorted(os.listdir(image_path), reverse=False):
+            for observation in sorted(
+                    os.listdir(image_path),
+                    key=lambda name: os.path.getmtime(os.path.join(image_path, name))):
                 if observation.endswith(".tif"):
                     disaster_type = global_cache.get('natural_disaster', 'No disaster info')
                     if disaster_type == 'Flood':
@@ -5487,15 +5681,12 @@ def update_occupancy_grid_flood_sat_fixed(
         ogm_crs = RioCRS.from_user_input(ogm_crs)
         observation_crs = RioCRS.from_user_input(observation_crs)
 
-        # 1) Prepare observation as float and mask its NoData to NaN
+        # 1) Prepare the categorical observation. Keep the source NoData value
+        # intact so rasterio can exclude it during reprojection.
         obs = observation_data_.astype(np.float32, copy=True)
         if obs_nodata is not None and np.isfinite(obs_nodata):
             nodata_mask = (observation_data_ == obs_nodata)
-            if nodata_mask.any():
-                obs[nodata_mask] = np.nan
             logger.info(f"[FUSE] NoData in OBS: {int(nodata_mask.sum())}/{observation_data_.size} (value={obs_nodata})")
-        # else:
-        #     logger.info("[FUSE] obs_nodata=None (no numeric NoData masked before reprojection)")
 
         # 2) Reproject observation *directly to OGM grid* (same transform, CRS, and shape)
         obs_on_ogm = np.full_like(OGMData, np.nan, dtype=np.float32)
@@ -5506,7 +5697,8 @@ def update_occupancy_grid_flood_sat_fixed(
             src_crs=observation_crs,
             dst_transform=_gt_to_affine(OGM_gt_),
             dst_crs=ogm_crs,
-            resampling=Resampling.bilinear,
+            # EOFloodExtent is categorical: 0=no water, 1=water, NoData=unknown.
+            resampling=Resampling.nearest,
             src_nodata=obs_nodata,
             dst_nodata=np.nan,
         )
@@ -5514,10 +5706,9 @@ def update_occupancy_grid_flood_sat_fixed(
         # 3) Bayesian fusion on the aligned grid
         prior = np.clip(OGMData.astype(np.float32), 0.0, 1.0)
 
-        # Map positive satellite flood support to bounded likelihoods. Zero or
-        # background pixels are not treated as no-flood observations; untouched
-        # cells keep their prior probability.
-        sat_no_flood_likelihood = 0.50
+        # Valid zero pixels are observed non-water and must reduce prior flood
+        # probability. Only NoData and cells outside the observation are ignored.
+        sat_no_flood_likelihood = 0.15
         sat_flood_likelihood = 0.85
         obs_norm = np.clip(obs_on_ogm, 0.0, 1.0)
         likelihood = sat_no_flood_likelihood + (
@@ -5525,19 +5716,32 @@ def update_occupancy_grid_flood_sat_fixed(
         ) * obs_norm
         likelihood = np.clip(likelihood, epsilon, 1.0 - epsilon)
 
-        # Update only cells where the satellite product gives positive flood
-        # support. Cells outside the measurement support remain unchanged.
-        mask_valid = np.isfinite(obs_on_ogm) & (obs_norm > 0.0)
+        mask_valid = np.isfinite(obs_on_ogm)
         if not np.any(mask_valid):
             logger.info("No valid observation pixels after re-projection; returning OGM unchanged.")
             return prior  # ensure dtype/clip
+
+        water_cells = int(np.count_nonzero(obs_norm[mask_valid] > 0.5))
+        no_water_cells = int(mask_valid.sum()) - water_cells
+        logger.info(
+            "[FUSE] Valid satellite cells: "
+            f"water={water_cells}, no_water={no_water_cells}"
+        )
 
         # log-odds update (clamped like your code)
         """log_odds_prior = np.log((prior[mask_valid] + epsilon) / (1.0 - prior[mask_valid] + epsilon))"""
         log_odds_prior = np.log((np.clip(prior[mask_valid], epsilon, 1 - epsilon)) /
                                 (1.0 - np.clip(prior[mask_valid], epsilon, 1 - epsilon)))
+        log_odds_prior = np.clip(log_odds_prior, -5.0, 5.0)
         log_odds_obs = np.log(likelihood[mask_valid] / (1.0 - likelihood[mask_valid]))
-        log_odds_post = np.clip(log_odds_prior + log_odds_obs, -5.0, 5.0)
+        # Flood extent changes over time, so the newest satellite observation
+        # must outweigh older accumulated evidence without replacing it.
+        satellite_prior_retention = 0.25
+        log_odds_post = np.clip(
+            satellite_prior_retention * log_odds_prior + log_odds_obs,
+            -5.0,
+            5.0,
+        )
         updated_prob = 1.0 / (1.0 + np.exp(-log_odds_post))  # sigmoid
 
         # 4) Write back to full OGM grid and return

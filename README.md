@@ -140,6 +140,8 @@ The most relevant variables are listed below.
 | `OGM_OBJ_RESOLUTION` | Object map resolution in meters/pixel. | `5` |
 | `OGM_ND_RESOLUTION` | Natural-disaster OGM resolution in meters/pixel. | `5` |
 | `OGM_UPLOAD_INTERVAL_SEC` | Minimum time between Maps4Fire/Maps4Flood uploads and entity updates. Fusion still continues locally between uploads. | `600` |
+| `FLOODSIM_PLAYBACK_MODE` | Flood-simulation processing mode: `immediate`, `brk_trial`, or `dmalian_trial`. | `immediate` |
+| `DMALIAN_FLOODSIM_ROUND_DURATION_SEC` | Duration of each DMALIAN FloodSim playback round. Used only in `dmalian_trial` mode. | `1800` |
 | `SCALING_FACTOR` | Scaling factor for processing. | `1` |
 | `USE_TAKEOFF_ALTITUDE_FOR_GEOREF` | If `True`, UAV georeferencing uses takeoff/base ground altitude plus DJI `RelativeAltitude`. If `False`, it uses image metadata `GPSAltitude`. | `True` |
 | `TAKEOFF_GROUND_ALTITUDE_M` | Fallback takeoff/base ground altitude in meters above sea level. Used only when `USE_TAKEOFF_ALTITUDE_FOR_GEOREF=True` and no DEM-derived value is available. | `150.3` |
@@ -147,6 +149,8 @@ The most relevant variables are listed below.
 > **Important:** `PROCESSING_UNIT` must be `cpu` (not `cpus`).
 
 > **Historical trials:** For pure historical trials where the UAV images were not captured by USE and the real takeoff/base location is unknown or unreliable, set `USE_TAKEOFF_ALTITUDE_FOR_GEOREF=False` so the georeferencing uses `GPSAltitude` from the image metadata.
+
+> **DMALIAN trial:** Set `FLOODSIM_PLAYBACK_MODE=dmalian_trial` and `DMALIAN_FLOODSIM_ROUND_DURATION_SEC=1800`. The application replays the two Greece FloodSim rounds chronologically and skips their duplicate overlapping states.
 
 ---
 
@@ -241,6 +245,8 @@ docker run -it --rm \
   -e OGM_OBJ_RESOLUTION="5" \
   -e OGM_ND_RESOLUTION="5" \
   -e OGM_UPLOAD_INTERVAL_SEC="600" \
+  -e FLOODSIM_PLAYBACK_MODE="immediate" \
+  -e DMALIAN_FLOODSIM_ROUND_DURATION_SEC="1800" \
   -e SCALING_FACTOR="1" \
   -e USE_TAKEOFF_ALTITUDE_FOR_GEOREF="True" \
   -e TAKEOFF_GROUND_ALTITUDE_M="150.3" \
